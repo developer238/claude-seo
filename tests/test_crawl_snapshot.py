@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -187,7 +188,7 @@ def test_seed_urls_expands_sitemap_index_and_urlset(monkeypatch):
         },
     )
     args = SimpleNamespace(no_robots=False, timeout=1, user_agent="TestBot", max_pages=10)
-    _, seeds = cs.seed_urls("https://example.com/", args, "example.com", "https://example.com")
+    _, seeds, _ = cs.seed_urls("https://example.com/", args, "example.com", "https://example.com")
     assert seeds == ["https://example.com/", "https://example.com/a/", "https://example.com/b"]
 
 
@@ -215,3 +216,128 @@ def test_final_url_resolves_two_hop_redirect(monkeypatch):
     cs.add_redirect_chains(pages)
     assert pages["https://example.com/a"]["final_url"] == "https://example.com/c"
     assert pages["https://example.com/b"]["final_url"] == "https://example.com/c"
+
+
+def test_static_assets_do_not_count_toward_page_limit(monkeypatch):
+    assets = ["jpeg", "png", "pdf", "css", "js", "xml", "woff2"]
+    asset_links = "".join(
+        '<a href="/assets/file-%s.%s">asset</a>' % (i, ext) for i, ext in enumerate(assets)
+    )
+    asset_links += "".join('<a href="/gallery/nails/%d.jpeg">image</a>' % i for i in range(400))
+    site = {
+        "https://example.com/": (
+            200,
+            {"Content-Type": "text/html"},
+            (asset_links + '<a href="/two">two</a>').encode(),
+        ),
+        "https://example.com/two": (
+            200,
+            {"Content-Type": "text/html"},
+            b'<a href="/three">three</a>',
+        ),
+        "https://example.com/three": (200, {"Content-Type": "text/html"}, b"<title>three</title>"),
+    }
+    calls = []
+
+    def fake(url, timeout=30, user_agent=None):
+        calls.append(url)
+        status, headers, body = site.get(url, (404, {"Content-Type": "text/html"}, b""))
+        return {"status": status, "headers": headers, "body": body}
+
+    monkeypatch.setattr(cs, "fetch", fake)
+    monkeypatch.setattr(cs, "validate_url_strict", lambda url: (url, "203.0.113.1"))
+    args = SimpleNamespace(
+        no_robots=True,
+        timeout=1,
+        user_agent="TestBot",
+        max_pages=10,
+        concurrency=2,
+        delay=0,
+        refdomains=None,
+    )
+    snap, errors, _ = cs.crawl_site("https://example.com/", args)
+    assert errors == 0
+    assert len(snap["pages"]) == 3
+    assert set(snap["pages"]) == {
+        "https://example.com/",
+        "https://example.com/two",
+        "https://example.com/three",
+    }
+    assert not any("/assets/" in url or "/gallery/" in url for url in calls)
+
+
+def test_crawl_traps_are_not_crawlable():
+    assert not cs.is_crawlable_url("https://example.com/search?a=1&b=2&c=3&d=4&e=5&f=6&g=7")
+    assert not cs.is_crawlable_url("https://example.com/a/b/a/b/a/b/a")
+    assert cs.is_crawlable_url("https://example.com/category/shoes")
+
+
+def test_fetch_record_decodes_declared_charset(monkeypatch):
+    url = "https://example.com/"
+    body = "<html><title>Café</title><body>café</body></html>".encode("iso-8859-1")
+    monkeypatch.setattr(
+        cs,
+        "fetch",
+        lambda *args, **kwargs: {
+            "status": 200,
+            "headers": {"Content-Type": "text/html; charset=ISO-8859-1"},
+            "body": body,
+        },
+    )
+    args = SimpleNamespace(no_robots=True, timeout=1, user_agent="TestBot", delay=0)
+    _, record, _ = cs.fetch_record(url, "example.com", None, args)
+    assert record["title"] == "Café"
+    assert record["word_count"] == 1
+
+
+def test_robots_404_allows_but_503_fails_with_json(monkeypatch, capsys):
+    monkeypatch.setattr(cs, "validate_url_strict", lambda url: (url, "203.0.113.1"))
+    args = SimpleNamespace(
+        no_robots=False,
+        timeout=1,
+        user_agent="TestBot",
+        max_pages=2,
+        concurrency=1,
+        delay=0,
+        refdomains=None,
+    )
+    monkeypatch.setattr(
+        cs,
+        "fetch",
+        lambda url, *args, **kwargs: {
+            "status": 404,
+            "headers": {},
+            "body": b"",
+        },
+    )
+    snap, _, _ = cs.crawl_site("https://example.com/", args)
+    assert snap["settings"]["robots_status"] == 404
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        cs,
+        "fetch",
+        lambda url, *args, **kwargs: {"status": 503, "headers": {}, "body": b""},
+    )
+    monkeypatch.setattr(cs.sys, "argv", ["crawl_snapshot.py", "crawl", "https://example.com/"])
+    assert cs.main() == 1
+    assert json.loads(capsys.readouterr().err) == {
+        "error": "robots.txt unavailable (status or error); retry later or pass --no-robots"
+    }
+
+
+def test_fetch_marks_capped_body_as_truncated(monkeypatch):
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def iter_content(self, chunk_size):
+            yield b"x" * (cs.MAX_BODY + 1)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cs, "safe_requests_get", lambda *args, **kwargs: Response())
+    result = cs.fetch("https://example.com/")
+    assert len(result["body"]) == cs.MAX_BODY
+    assert result["truncated"] is True

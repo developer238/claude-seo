@@ -3,6 +3,7 @@
 
 Usage: crawl URL [options], onpage SNAPSHOT, or diff OLD NEW.
 Output: snapshot JSON or the shared check envelope.
+Static asset URLs are skipped and do not count toward the page limit.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
@@ -40,9 +41,47 @@ from snapshot_io import (  # noqa: E402
     snapshot_filename,
     write_json,
 )
-from url_safety import DEFAULT_USER_AGENT, safe_requests_get, validate_url_strict  # noqa: E402
+from url_safety import DEFAULT_USER_AGENT, decode_body, safe_requests_get, validate_url_strict  # noqa: E402
 
 MAX_BODY = 3 * 1024 * 1024
+STATIC_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".avif",
+    ".svg",
+    ".ico",
+    ".bmp",
+    ".tiff",
+    ".css",
+    ".js",
+    ".mjs",
+    ".map",
+    ".json",
+    ".xml",
+    ".txt",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+    ".mp4",
+    ".webm",
+    ".mp3",
+    ".wav",
+    ".ogg",
+    ".zip",
+    ".gz",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+}
 
 # url_safety pins DNS through a process-wide patch and refuses concurrent use,
 # so the network call itself is serialised. Parsing and the politeness delay
@@ -61,12 +100,19 @@ def fetch(url, timeout=30, user_agent=None):
             headers={"User-Agent": user_agent or DEFAULT_USER_AGENT},
         )
     body = bytearray()
+    truncated = False
     for chunk in r.iter_content(65536):
         if len(body) + len(chunk) > MAX_BODY:
             body.extend(chunk[: MAX_BODY - len(body)])
+            truncated = True
             break
         body.extend(chunk)
-    out = {"status": r.status_code, "headers": dict(r.headers), "body": bytes(body)}
+    out = {
+        "status": r.status_code,
+        "headers": dict(r.headers),
+        "body": bytes(body),
+        "truncated": truncated,
+    }
     r.close()
     return out
 
@@ -185,22 +231,44 @@ def indexability(p):
     return True, "ok"
 
 
+def is_crawlable_url(url):
+    """Reject static assets and paths likely to be generated crawl traps."""
+    parts = urlsplit(url)
+    if Path(parts.path.lower()).suffix in STATIC_EXTENSIONS:
+        return False
+    if len(parse_qsl(parts.query, keep_blank_values=True)) > 6:
+        return False
+    segments = [segment for segment in parts.path.split("/") if segment]
+    return not any(segments.count(segment) >= 4 for segment in set(segments))
+
+
 def seed_urls(start, args, host, origin):
     """Return start and bounded sitemap URL seeds, expanding sitemap indexes."""
     robots = RobotFileParser()
     robots.set_url(origin + "/robots.txt")
     sitemap_urls = []
+    robots_status = None
     if not args.no_robots:
         try:
             rr = fetch(origin + "/robots.txt", args.timeout, args.user_agent)
+            robots_status = rr["status"]
+        except Exception as exc:
+            raise RuntimeError(
+                "robots.txt unavailable (status or error); retry later or pass --no-robots"
+            ) from exc
+        if robots_status >= 500 or 300 <= robots_status < 400 or robots_status < 200:
+            raise RuntimeError(
+                "robots.txt unavailable (status or error); retry later or pass --no-robots"
+            )
+        if robots_status == 200:
             lines = rr["body"].decode("utf-8", "replace").splitlines()
-            robots.parse(lines if rr["status"] == 200 else [])
+            robots.parse(lines)
             sitemap_urls = [
                 m.group(1)
                 for line in lines
                 if (m := re.match(r"\s*Sitemap\s*:\s*(\S+)", line, re.I))
             ]
-        except Exception:
+        else:
             robots.parse([])
     else:
         robots.parse([])
@@ -232,13 +300,14 @@ def seed_urls(start, args, host, origin):
                     continue
                 if is_index and target not in checked:
                     candidates.append(target)
-                elif not is_index:
+                elif not is_index and is_crawlable_url(target):
                     expanded.append(target)
                     if len(expanded) >= args.max_pages:
                         break
         except Exception:
             continue
-    return robots, list(dict.fromkeys([start] + expanded))
+    urls = [url for url in [start] + expanded if is_crawlable_url(url)]
+    return robots, list(dict.fromkeys(urls)), robots_status
 
 
 def fetch_record(url, host, robots, args):
@@ -279,13 +348,15 @@ def fetch_record(url, host, robots, args):
         "redirect_chain": [],
         "content_type": content_type,
     }
+    if response.get("truncated"):
+        page["truncated"] = True
     targets = []
     if 300 <= response["status"] < 400 and headers.get("Location"):
         page["redirect_to"] = normalize_url(urljoin(url, headers["Location"]))
-        if is_internal(page["redirect_to"], host):
+        if is_internal(page["redirect_to"], host) and is_crawlable_url(page["redirect_to"]):
             targets.append(page["redirect_to"])
     elif response["status"] == 200 and "html" in content_type.lower():
-        page.update(extract_html(response["body"].decode("utf-8", "replace"), url, host, headers))
+        page.update(extract_html(decode_body(response["body"], content_type), url, host, headers))
         targets = [link["target"] for link in page["links"] if link["internal"]]
     indexable, reason = indexability(page)
     page.update(indexable=indexable, indexability_reason=reason)
@@ -312,7 +383,7 @@ def add_redirect_chains(pages):
             page["final_url"] = final_url
 
 
-def build_snapshot(start, host, origin, pages, args):
+def build_snapshot(start, host, origin, pages, args, robots_status):
     snapshot = {
         "format": FORMAT,
         "site": origin,
@@ -323,6 +394,7 @@ def build_snapshot(start, host, origin, pages, args):
             "max_pages": args.max_pages,
             "concurrency": args.concurrency,
             "robots": not args.no_robots,
+            "robots_status": robots_status,
             "delay": args.delay,
             "user_agent": args.user_agent or DEFAULT_USER_AGENT,
         },
@@ -348,7 +420,7 @@ def crawl_site(start, args):
     parts = urlsplit(start)
     host = parts.hostname
     origin = parts.scheme + "://" + parts.netloc
-    robots, seeds = seed_urls(start, args, host, origin)
+    robots, seeds, robots_status = seed_urls(start, args, host, origin)
     queue = deque(seeds)
     queued = set(seeds)
     pages = {}
@@ -389,6 +461,7 @@ def crawl_site(start, args):
                         continue
                     if (
                         is_internal(t, host)
+                        and is_crawlable_url(t)
                         and t not in queued
                         and len(queued) < args.max_pages * 3
                     ):
@@ -396,7 +469,7 @@ def crawl_site(start, args):
                         queue.append(t)
                 print("crawled %d/%d %s" % (len(pages), args.max_pages, key), file=sys.stderr)
     add_redirect_chains(pages)
-    snap = build_snapshot(start, host, origin, pages, args)
+    snap = build_snapshot(start, host, origin, pages, args, robots_status)
     return snap, errors, time.monotonic() - started
 
 

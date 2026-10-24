@@ -58,6 +58,8 @@ File `snapshot-YYYY-MM-DD.json` (`.json.gz` also accepted). Never edit by hand.
 ```
 
 Rules:
+- Static asset URLs are not crawled; seo-images covers images
+- Capped response bodies are marked with `truncated: true`.
 - Every internal URL discovered (links, sitemap, redirect targets) gets an entry,
   fetched with GET and no redirect-following, so link targets have a real status.
   Non-200 and non-HTML entries carry only the status fields.
