@@ -89,6 +89,7 @@ def test_inlanguage_domain_errors_passes_and_item_counts():
         "LegalService.inLanguage not defined for LegalService",
         "BreadcrumbList.inLanguage not defined for BreadcrumbList",
     ]
+    assert all(x["severity"] == "High" for x in invalid)
     assert {"CreativeWork", "Event"}.issubset(invalid[0]["allowed_on"])
     assert invalid[0]["fix"] == (
         "remove the property from LegalService or move it to a WebPage/CreativeWork node."
@@ -116,6 +117,7 @@ def test_missing_context_unknown_type_prefixed_type_and_references():
     )
     assert sum(x["code"] == "schema-syntax" for x in issues) == 1
     assert sum(x["code"] == "schema-type-unknown" for x in issues) == 1
+    assert all(x["severity"] == "High" for x in issues)
     assert next(x for x in issues if x["code"] == "schema-type-unknown").get("suggestion")
 
 
@@ -155,11 +157,21 @@ def test_context_restricted_google_rules_and_summary_kinds():
         }
     ]
     issues = validate(blocks, rules=rules)
-    assert len([x for x in issues if x["code"] == "schema-required-missing"]) == 2
-    assert all(x["kind"] == "google" and x["severity"] == "High" for x in issues)
-    findings, summary = sv.summarize({"https://example.test/": issues})
+    required = [x for x in issues if x["code"] == "schema-required-missing"]
+    assert len(required) == 2
+    assert all(x["kind"] == "google" and x["severity"] == "Medium" for x in required)
+    findings, summary = sv.summarize(
+        {"https://example.test/": issues},
+        items_by_page={"https://example.test/": sv.schema_items(blocks)},
+    )
     assert summary["pages_with_google_errors"] == 1
     assert summary["pages_with_schemaorg_errors"] == 0
+    assert (summary["items_checked"], summary["items_failed"], summary["items_passed"]) == (
+        3,
+        1,
+        2,
+    )
+    assert next(f for f in findings if f["id"] == "schema-required-missing")["severity"] == "Medium"
     assert all(
         "kind" in detail and "severity" in detail for f in findings for detail in f["details"]
     )

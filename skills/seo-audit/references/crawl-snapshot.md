@@ -6,6 +6,10 @@ file and writes JSON that `seo-audit` merges into `findings/<category>.md` and
 
 ## Pipeline
 
+One command runs everything below and merges it:
+`$CS run audit_checks.py <url> --out-dir <domain>-audit --max-pages 500 [--serp FILE ...] [--refdomains FILE] [--no-external] [--js-pages 10 | --no-js]`
+It writes `findings/site-checks.json` (categories compatible with `audit-data.json`, theme %, manifest) and `findings/site-checks.md`. A step that fails is recorded in the manifest and the rest still run. Individual steps:
+
 ```
 CS="${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo"
 $CS run crawl_snapshot.py crawl <url> --max-pages 500 --out <domain>-audit/snapshots/

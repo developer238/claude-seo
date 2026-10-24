@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Site-wide audit checks that run from one dated crawl snapshot
   (`claude-seo-snapshot/1`, see `skills/seo-audit/references/crawl-snapshot.md`):
+  - `audit_checks.py`: one command that crawls, runs every check below and merges them into `site-checks.json` and `site-checks.md` (theme percentages, severity counts, Fix first list, automatic diff against the previous snapshot).
   - `crawl_snapshot.py`: robots-aware crawler, `onpage` (meta description too
     long, missing title or description) and `diff` (title, meta description,
     H1 and word-count changes, new and lost pages and referring domains).

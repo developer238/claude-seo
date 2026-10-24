@@ -52,6 +52,8 @@ Delay between requests: 1 second
 
 ## Site-Wide Checks (crawl snapshot)
 
+Shortcut: `"${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo" run audit_checks.py <url> --out-dir {domain}-audit --max-pages 500` runs all steps below and writes `findings/site-checks.{json,md}`; merge its `categories` into `audit-data.json`.
+
 `crawl_snapshot.py` writes one dated snapshot (`snapshot-YYYY-MM-DD.json`); every check below reads it and writes JSON with `findings[]` to merge into `findings/*.md` and `audit-data.json`. Format, finding ids and thresholds: `references/crawl-snapshot.md`.
 
 ```bash

@@ -90,7 +90,7 @@ claude-seo/
     seo-flow.md                  # FLOW framework integration
   hooks/                           # Quality gate hooks
     hooks.json                   # PostToolUse schema validation
-  scripts/                         # 67 Python execution scripts
+  scripts/                         # 68 Python execution scripts
     google_auth.py               # Credential management (OAuth, SA, API key, 4-tier detection)
     backlinks_auth.py            # Backlink API credential management (Moz, Bing)
     moz_api.py                   # Moz Link Explorer API (DA/PA, spam, domains, anchors)
@@ -130,6 +130,7 @@ claude-seo/
     agentic_check.py             # Agent-readiness HTTP auditor (robots, llms.txt, Markdown, ARD, well-known, WebMCP)
     agentic_fix.py               # Agent-readiness fix drafter (robots Content-Signal, llms.txt, ai-catalog, WebMCP)
     lighthouse_agentic.py        # Lighthouse Agentic Browsing fraction reader (PSI or saved JSON)
+    audit_checks.py              # One command: crawl, all site-wide checks, merged site-checks.json/.md
     js_impact.py                 # JavaScript impact: content, links and schema that only exist after rendering
     link_audit.py                # Internal link status, one-inlink pages, external link classes (4xx, 3xx, timeout, bot-block)
     content_quality.py           # QRG-aligned content quality detector

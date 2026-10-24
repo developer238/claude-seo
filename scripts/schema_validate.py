@@ -428,7 +428,7 @@ def validate_page(url, blocks, syntax, vocab, rules):
                             )
                             add(
                                 code,
-                                "High" if level == "required" else "Low",
+                                "Medium" if level == "required" else "Low",
                                 node,
                                 base,
                                 "%s missing %s" % (specific, " or ".join(choices)),
@@ -454,27 +454,40 @@ def summarize(pages, errors_only=False, items_by_page=None):
             item["details"].append(
                 {k: v for k, v in i.items() if k != "code" and not k.startswith("_")}
             )
+            is_schemaorg_error = i["kind"] == "schemaorg" and i["code"] in {
+                "schema-syntax",
+                "schema-type-unknown",
+                "schema-property-invalid",
+            }
+            is_google_error = i["kind"] == "google" and i["code"] == "schema-required-missing"
+            if is_schemaorg_error:
+                schema_error_pages.add(url)
+            if is_google_error:
+                google_error_pages.add(url)
             if i["severity"] == "High":
-                if i["kind"] == "schemaorg":
-                    schema_error_pages.add(url)
-                else:
-                    google_error_pages.add(url)
                 for t in filter(None, i["node"].split(",")):
                     by_type[t] = by_type.get(t, 0) + 1
         page_items = (items_by_page or {}).get(url, [])
         failed_nodes = {
             i.get("_node_id")
             for i in issues
-            if i.get("severity") == "High" and i.get("kind") in ("schemaorg", "google")
+            if (
+                i.get("kind") == "schemaorg"
+                and i.get("code")
+                in {"schema-syntax", "schema-type-unknown", "schema-property-invalid"}
+            )
+            or (i.get("kind") == "google" and i.get("code") == "schema-required-missing")
         }
         items_checked += len(page_items)
         items_failed += sum(bool(owned & failed_nodes) for _, _, owned in page_items)
     findings = [
         finding(
             code,
-            "High"
-            if code != "schema-recommended-missing" and code != "schema-value-type"
-            else ("Low" if code == "schema-recommended-missing" else "Medium"),
+            {
+                "schema-required-missing": "Medium",
+                "schema-recommended-missing": "Low",
+                "schema-value-type": "Medium",
+            }.get(code, "High"),
             code.replace("schema-", "Schema ").replace("-", " "),
             sorted(v["pages"]),
             details=v["details"],

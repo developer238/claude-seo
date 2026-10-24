@@ -47,6 +47,32 @@ def test_merge_mapping_sorting_and_zero_counts():
     assert all(row["id"] != "links-to-broken" for values in by_name.values() for row in values)
 
 
+def test_recommendation_fallback_and_script_recommendation_precedence():
+    merged, _ = audit_checks._finding_rows(
+        [
+            {
+                "findings": [
+                    {"id": "links-to-broken", "severity": "High", "count": 2, "title": "Broken"},
+                    {
+                        "id": "links-to-redirect",
+                        "severity": "Medium",
+                        "count": 1,
+                        "title": "Redirect",
+                        "recommendation": "Script advice.",
+                    },
+                ]
+            }
+        ]
+    )
+    findings = merged["categories"][0]["findings"]
+    assert findings[0]["recommendation"] == audit_checks.RECOMMENDATIONS["links-to-broken"]
+    assert findings[1]["recommendation"] == "Script advice."
+    md = audit_checks._markdown(
+        "https://e.test", "2026-10-24", 1, None, {}, {}, merged["categories"], []
+    )
+    assert "**Broken** (2): " + audit_checks.RECOMMENDATIONS["links-to-broken"] in md
+
+
 def test_pipeline_continues_on_failed_check_and_writes_report(tmp_path, monkeypatch, capsys):
     snap_dir = tmp_path / "snapshots"
     snap_dir.mkdir()
