@@ -13,6 +13,7 @@
       "breadcrumb": true,
       "featured_snippet": true,
       "is_featured_snippet": true,
+      "checks": true,
       "rating": true,
       "timestamp": true,
       "local_pack": true,
