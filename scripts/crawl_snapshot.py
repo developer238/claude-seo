@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Bounded crawler and checks for claude-seo snapshot/1.
 
-Usage: crawl URL [options], onpage SNAPSHOT, or diff OLD NEW.
-Output: snapshot JSON or the shared check envelope.
+Usage: crawl URL [options], onpage SNAPSHOT, diff OLD NEW, or themes SNAPSHOT.
+Output: snapshot JSON or a shared check envelope.
 Static asset URLs are skipped and do not count toward the page limit.
 """
 
@@ -92,6 +92,7 @@ _FETCH_LOCK = threading.Lock()
 def fetch(url, timeout=30, user_agent=None):
     """Replaceable SSRF-safe GET, without redirect following."""
     with _FETCH_LOCK:
+        started = time.perf_counter()
         r = safe_requests_get(
             url,
             timeout=timeout,
@@ -112,12 +113,13 @@ def fetch(url, timeout=30, user_agent=None):
         "headers": dict(r.headers),
         "body": bytes(body),
         "truncated": truncated,
+        "response_ms": int((time.perf_counter() - started) * 1000),
     }
     r.close()
     return out
 
 
-def extract_html(html, page_url, site_host, headers=None):
+def extract_html(html, page_url, site_host, headers=None, html_bytes=None, response_ms=0):
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "html.parser")
@@ -153,6 +155,18 @@ def extract_html(html, page_url, site_host, headers=None):
         node.decompose()
     main = text_soup.find("main") or text_soup.body or text_soup
     text = " ".join(main.get_text(" ", strip=True).split())
+    raw_size = html_bytes if html_bytes is not None else len(html.encode("utf-8"))
+    visible_size = len(text.encode("utf-8"))
+    heading_texts = [
+        " ".join(node.get_text(" ", strip=True).split())
+        for node in soup.find_all(["h2", "h3", "h4"])
+    ]
+    question_count = sum(
+        heading.endswith("?")
+        or re.match(r"^(who|what|when|where|why|how|can|is|does|do|are|should)\b", heading, re.I)
+        is not None
+        for heading in heading_texts
+    )
     links = []
     seen = set()
     for a in soup.find_all("a", href=True):
@@ -167,14 +181,24 @@ def extract_html(html, page_url, site_host, headers=None):
         if target in seen:
             continue
         seen.add(target)
-        links.append(
-            {
-                "target": target,
-                "internal": is_internal(target, site_host),
-                "nofollow": is_nofollow(a.get("rel")),
-                "text": a.get_text(" ", strip=True)[:100],
-            }
+        link = {
+            "target": target,
+            "internal": is_internal(target, site_host),
+            "nofollow": is_nofollow(a.get("rel")),
+            "text": a.get_text(" ", strip=True)[:100],
+        }
+        labels = [a.get("aria-label", "").strip(), a.get("title", "").strip()]
+        labelledby = a.get("aria-labelledby", "").split()
+        labels.extend(
+            soup.find(id=label_id).get_text(" ", strip=True)
+            for label_id in labelledby
+            if soup.find(id=label_id)
         )
+        labels.extend(img.get("alt", "").strip() for img in a.find_all("img"))
+        labels.extend(svg_title.get_text(" ", strip=True) for svg_title in a.select("svg title"))
+        if not any(labels) and not link["text"]:
+            link["no_anchor"] = True
+        links.append(link)
     jsonld = []
     errors = []
     for i, s in enumerate(
@@ -185,6 +209,31 @@ def extract_html(html, page_url, site_host, headers=None):
             jsonld.append(json.loads(raw))
         except (ValueError, TypeError) as e:
             errors.append("block %d: %s" % (i, e))
+    byline = bool(
+        soup.find("meta", attrs={"name": re.compile("^author$", re.I)})
+        or soup.find(attrs={"rel": lambda rel: rel and "author" in rel})
+        or soup.find(attrs={"itemprop": re.compile("^author$", re.I)})
+        or soup.select_one(".author, [class*='author'], [class*='byline']")
+        or re.search(r"\bBy\s*:?\s+[A-Z][^\n]{1,80}", text, re.I)
+    )
+    has_date = bool(
+        soup.find("time", datetime=True)
+        or soup.find(
+            "meta", attrs={"property": re.compile(r"^article:(published|modified)_time$", re.I)}
+        )
+    )
+
+    def contains_date(value):
+        if isinstance(value, dict):
+            return any(
+                key in ("datePublished", "dateModified") or contains_date(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(contains_date(item) for item in value)
+        return False
+
+    has_date = has_date or contains_date(jsonld)
     return {
         "title": title,
         "title_len": len(title),
@@ -200,6 +249,14 @@ def extract_html(html, page_url, site_host, headers=None):
         "links": links,
         "jsonld": jsonld,
         "jsonld_errors": errors,
+        "html_bytes": raw_size,
+        "text_ratio": round(visible_size / raw_size, 3) if raw_size else 0.0,
+        "response_ms": response_ms,
+        "h2_count": len(soup.find_all("h2")),
+        "question_headings": question_count,
+        "list_count": len(soup.find_all(["ul", "ol", "table"])),
+        "has_byline": bool(byline),
+        "has_date": has_date,
     }
 
 
@@ -248,10 +305,16 @@ def seed_urls(start, args, host, origin):
     robots.set_url(origin + "/robots.txt")
     sitemap_urls = []
     robots_status = None
+    robots_record = {"url": origin + "/robots.txt", "status": None, "bytes": 0, "text": None}
     if not args.no_robots:
         try:
             rr = fetch(origin + "/robots.txt", args.timeout, args.user_agent)
             robots_status = rr["status"]
+            robots_record.update(
+                status=robots_status,
+                bytes=len(rr["body"]),
+                text=rr["body"][: 64 * 1024].decode("utf-8", "replace"),
+            )
         except Exception as exc:
             raise RuntimeError(
                 "robots.txt unavailable (status or error); retry later or pass --no-robots"
@@ -307,7 +370,7 @@ def seed_urls(start, args, host, origin):
         except Exception:
             continue
     urls = [url for url in [start] + expanded if is_crawlable_url(url)]
-    return robots, list(dict.fromkeys(urls)), robots_status
+    return robots, list(dict.fromkeys(urls)), robots_status, robots_record
 
 
 def fetch_record(url, host, robots, args):
@@ -356,7 +419,16 @@ def fetch_record(url, host, robots, args):
         if is_internal(page["redirect_to"], host) and is_crawlable_url(page["redirect_to"]):
             targets.append(page["redirect_to"])
     elif response["status"] == 200 and "html" in content_type.lower():
-        page.update(extract_html(decode_body(response["body"], content_type), url, host, headers))
+        page.update(
+            extract_html(
+                decode_body(response["body"], content_type),
+                url,
+                host,
+                headers,
+                html_bytes=len(response["body"]),
+                response_ms=response.get("response_ms", 0),
+            )
+        )
         targets = [link["target"] for link in page["links"] if link["internal"]]
     indexable, reason = indexability(page)
     page.update(indexable=indexable, indexability_reason=reason)
@@ -383,7 +455,7 @@ def add_redirect_chains(pages):
             page["final_url"] = final_url
 
 
-def build_snapshot(start, host, origin, pages, args, robots_status):
+def build_snapshot(start, host, origin, pages, args, robots_status, robots_record):
     snapshot = {
         "format": FORMAT,
         "site": origin,
@@ -398,6 +470,7 @@ def build_snapshot(start, host, origin, pages, args, robots_status):
             "delay": args.delay,
             "user_agent": args.user_agent or DEFAULT_USER_AGENT,
         },
+        "robots": robots_record,
         "pages": pages,
     }
     if args.refdomains:
@@ -420,7 +493,7 @@ def crawl_site(start, args):
     parts = urlsplit(start)
     host = parts.hostname
     origin = parts.scheme + "://" + parts.netloc
-    robots, seeds, robots_status = seed_urls(start, args, host, origin)
+    robots, seeds, robots_status, robots_record = seed_urls(start, args, host, origin)
     queue = deque(seeds)
     queued = set(seeds)
     pages = {}
@@ -469,11 +542,148 @@ def crawl_site(start, args):
                         queue.append(t)
                 print("crawled %d/%d %s" % (len(pages), args.max_pages, key), file=sys.stderr)
     add_redirect_chains(pages)
-    snap = build_snapshot(start, host, origin, pages, args, robots_status)
+    snap = build_snapshot(start, host, origin, pages, args, robots_status, robots_record)
     return snap, errors, time.monotonic() - started
 
 
-def onpage(path, max_desc):
+def validate_robots(text):
+    """Return structured robots.txt syntax and policy diagnostics."""
+    known = {
+        "user-agent",
+        "allow",
+        "disallow",
+        "sitemap",
+        "crawl-delay",
+        "host",
+        "clean-param",
+        "request-rate",
+        "visit-time",
+        "content-signal",
+    }
+    issues = []
+
+    def issue(line, raw, code, message, severity):
+        issues.append(
+            {"line": line, "text": raw, "code": code, "message": message, "severity": severity}
+        )
+
+    if text.startswith("\ufeff"):
+        issue(1, text.splitlines()[0], "bom", "UTF-8 BOM may cause robots.txt to be ignored", "Low")
+    if len(text.encode("utf-8")) > 500 * 1024:
+        issue(0, "", "oversized", "File exceeds 500 KiB; Google ignores the excess", "Low")
+    active_agent = False
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.lstrip("\ufeff").strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            issue(number, raw, "missing-colon", "Line has no directive separator", "High")
+            continue
+        directive, value = (part.strip() for part in line.split(":", 1))
+        key = directive.lower()
+        if key == "noindex":
+            issue(
+                number,
+                raw,
+                "noindex-unsupported",
+                "noindex is unsupported in robots.txt since 2019",
+                "Low",
+            )
+            continue
+        if key not in known:
+            issue(
+                number,
+                raw,
+                "unknown-directive",
+                "non-standard directive, ignored by Google",
+                "Info",
+            )
+            continue
+        if key == "user-agent":
+            active_agent = True
+        elif key in {"allow", "disallow", "crawl-delay"} and not active_agent:
+            issue(
+                number, raw, "rule-before-user-agent", "Rule appears before any User-agent", "High"
+            )
+        if key in {"allow", "disallow"} and value and not value.startswith(("/", "*")):
+            issue(
+                number,
+                raw,
+                "invalid-rule-value",
+                "Allow/Disallow value should start with / or *",
+                "Low",
+            )
+        if key == "sitemap":
+            try:
+                sitemap_url = urlsplit(value)
+                valid_sitemap = sitemap_url.scheme.lower() in {"http", "https"} and bool(
+                    sitemap_url.hostname
+                )
+                _ = sitemap_url.port
+            except ValueError:
+                valid_sitemap = False
+            if not valid_sitemap or any(char.isspace() for char in value):
+                issue(
+                    number,
+                    raw,
+                    "invalid-sitemap",
+                    "Sitemap must be an absolute HTTP or HTTPS URL",
+                    "High",
+                )
+        if key == "content-signal":
+            seen = set()
+            for pair in value.split(","):
+                if "=" not in pair:
+                    issue(
+                        number,
+                        raw,
+                        "invalid-content-signal",
+                        "Content-Signal entries must use key=value",
+                        "High",
+                    )
+                    continue
+                signal_key, signal_value = (part.strip().lower() for part in pair.split("=", 1))
+                if signal_key in seen:
+                    issue(
+                        number,
+                        raw,
+                        "duplicate-content-signal-key",
+                        "Duplicate Content-Signal key",
+                        "Low",
+                    )
+                seen.add(signal_key)
+                if signal_key not in {"search", "ai-input", "ai-train"} or signal_value not in {
+                    "yes",
+                    "no",
+                }:
+                    issue(
+                        number,
+                        raw,
+                        "invalid-content-signal",
+                        "Unknown Content-Signal key or value",
+                        "High",
+                    )
+    return issues
+
+
+def _jsonld_types(blocks):
+    """All @type values in JSON-LD blocks, including @graph members."""
+    found = set()
+    stack = list(blocks)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            kind = node.get("@type")
+            found.update(kind if isinstance(kind, list) else [kind])
+            if isinstance(node.get("@graph"), list):
+                stack.extend(node["@graph"])
+    found.discard(None)
+    return {str(k) for k in found}
+
+
+def onpage(path, max_desc, min_text_ratio=0.10):
     snap = load_snapshot(path)
     pages = snap["pages"]
     html = {u: p for u, p in pages.items() if is_html_page(p)}
@@ -513,6 +723,206 @@ def onpage(path, max_desc):
         ),
     ]
     fs = [item for item in candidates if item["count"]]
+    counts = {
+        "meta-description-too-long": len(over),
+        "meta-description-missing": len(missing),
+        "title-missing": len(titles),
+    }
+    robots = snap.get("robots", {})
+    robots_issues = validate_robots(robots.get("text") or "")
+    if robots.get("bytes", 0) > 500 * 1024 and not any(
+        x["code"] == "oversized" for x in robots_issues
+    ):
+        robots_issues.append(
+            {
+                "line": 0,
+                "text": "",
+                "code": "oversized",
+                "message": "File exceeds 500 KiB; Google ignores the excess",
+                "severity": "Low",
+            }
+        )
+    status = robots.get("status")
+    if isinstance(status, int) and status >= 500:
+        robots_issues.append(
+            {
+                "line": 0,
+                "text": "",
+                "code": "robots-5xx",
+                "message": "robots.txt returned a server error",
+                "severity": "High",
+            }
+        )
+    elif status == 404:
+        robots_issues.append(
+            {
+                "line": 0,
+                "text": "",
+                "code": "robots-404",
+                "message": "No robots.txt",
+                "severity": "Info",
+            }
+        )
+    counts["robots-syntax"] = len(robots_issues)
+    if robots_issues:
+        rank = {"Info": 1, "Low": 2, "High": 3}
+        severity = max((item["severity"] for item in robots_issues), key=rank.get)
+        fs.append(
+            finding(
+                "robots-syntax",
+                severity,
+                "Robots.txt syntax or policy issues",
+                [],
+                count=len(robots_issues),
+                scope="all",
+                details=robots_issues,
+            )
+        )
+
+    no_anchor = {}
+    no_anchor_total = 0
+    nofollow_external = {}
+    nofollow_external_pages = {}
+    nofollow_total = 0
+    duplicate_titles = []
+    low_ratio = []
+    blocked = {"robots": [], "noindex": []}
+    ai_content = []
+    for url, p in html.items():
+        links = p.get("links", [])
+        empty_links = [
+            {"target": link["target"], "internal": link.get("internal", False)}
+            for link in links
+            if link.get("no_anchor")
+        ]
+        if p.get("indexable") and empty_links:
+            no_anchor[url] = empty_links
+            no_anchor_total += len(empty_links)
+        external_nofollow = [
+            link for link in links if not link.get("internal") and link.get("nofollow")
+        ]
+        if external_nofollow:
+            nofollow_total += len(external_nofollow)
+            nofollow_external_pages[url] = [
+                {"target": link["target"], "internal": False} for link in external_nofollow
+            ]
+            for link in external_nofollow:
+                target_host = urlsplit(link["target"]).hostname or ""
+                nofollow_external[target_host] = nofollow_external.get(target_host, 0) + 1
+        h1s = p.get("h1") or []
+        title = " ".join((p.get("title") or "").split()).casefold()
+        first_h1 = " ".join(h1s[0].split()).casefold() if h1s else ""
+        stripped_title = re.sub(r"\s+[|\-]\s+[^|\-]+$", "", title).strip()
+        if is_html_page(p) and first_h1 and (title == first_h1 or stripped_title == first_h1):
+            duplicate_titles.append({"url": url, "title": p.get("title"), "h1": h1s[0]})
+        ratio = p.get("text_ratio", 0)
+        if ratio < min_text_ratio:
+            low_ratio.append({"url": url, "ratio": ratio, "html_bytes": p.get("html_bytes", 0)})
+        path = urlsplit(url).path
+        is_article = path.startswith(("/blog", "/news")) or bool(
+            _jsonld_types(p.get("jsonld", [])) & {"Article", "BlogPosting", "NewsArticle"}
+        )
+        if p.get("indexable") and path not in {"", "/"}:
+            failed = []
+            if p.get("word_count", 0) < 300:
+                failed.append("thin")
+            if p.get("h2_count", 0) < 2:
+                failed.append("weak-structure")
+            if not p.get("jsonld"):
+                failed.append("no-structured-data")
+            if not p.get("question_headings", 0) and not p.get("list_count", 0):
+                failed.append("no-question-headings-or-lists")
+            if is_article and not p.get("has_byline") and not p.get("has_date"):
+                failed.append("no-byline-or-date")
+            if len(failed) >= 3:
+                ai_content.append(
+                    {"url": url, "failed": failed, "score": round((5 - len(failed)) / 5 * 100)}
+                )
+    for url, page in pages.items():
+        reason = page.get("indexability_reason")
+        if reason == "robots-blocked":
+            blocked["robots"].append({"url": url, "reason": reason})
+        elif reason in {"noindex-meta", "noindex-header"}:
+            blocked["noindex"].append({"url": url, "reason": reason})
+    counts.update(
+        {
+            "links-no-anchor": len(no_anchor),
+            "duplicate-h1-title": len(duplicate_titles),
+            "low-text-ratio": len(low_ratio),
+            "nofollow-external": len(nofollow_external_pages),
+            "pages-blocked": len(blocked["robots"]) + len(blocked["noindex"]),
+            "pages-blocked-robots": len(blocked["robots"]),
+            "pages-blocked-noindex": len(blocked["noindex"]),
+            "ai-content-signals": len(ai_content),
+        }
+    )
+    if no_anchor:
+        fs.append(
+            finding(
+                "links-no-anchor",
+                "Low",
+                "Pages contain links without accessible anchor text",
+                sorted(no_anchor),
+                count=len(no_anchor),
+                details=[{"url": u, "links": no_anchor[u]} for u in sorted(no_anchor)],
+            )
+        )
+    if duplicate_titles:
+        fs.append(
+            finding(
+                "duplicate-h1-title",
+                "Low",
+                "First H1 duplicates the page title",
+                [x["url"] for x in duplicate_titles],
+                details=duplicate_titles,
+            )
+        )
+    if low_ratio:
+        fs.append(
+            finding(
+                "low-text-ratio",
+                "Low",
+                "Pages have a low visible text ratio",
+                [x["url"] for x in low_ratio],
+                details=low_ratio,
+            )
+        )
+    if nofollow_external_pages:
+        fs.append(
+            finding(
+                "nofollow-external",
+                "Info",
+                "Pages link to external destinations with nofollow",
+                sorted(nofollow_external_pages),
+                count=len(nofollow_external_pages),
+                details=[
+                    {"url": url, "links": nofollow_external_pages[url]}
+                    for url in sorted(nofollow_external_pages)
+                ],
+            )
+        )
+    for scope, details in blocked.items():
+        if details:
+            fs.append(
+                finding(
+                    "pages-blocked",
+                    "Info",
+                    "Pages blocked from indexing: " + scope,
+                    [x["url"] for x in details],
+                    scope=scope,
+                    details=details,
+                )
+            )
+    if ai_content:
+        fs.append(
+            finding(
+                "ai-content-signals",
+                "Low",
+                "Pages have multiple weak content signals",
+                [x["url"] for x in ai_content],
+                details=ai_content,
+            )
+        )
     return envelope(
         "onpage",
         snap,
@@ -527,9 +937,185 @@ def onpage(path, max_desc):
             "meta_description_missing": len(missing),
             "title_missing": len(titles),
             "at_155": sum(len(p.get("meta_description") or "") > 155 for p in html.values()),
+            "counts": counts,
+            "links_no_anchor_total": no_anchor_total,
+            "nofollow_external_total": nofollow_total,
+            "nofollow_external_hosts": [
+                {"host": host, "links": count}
+                for host, count in sorted(
+                    nofollow_external.items(), key=lambda item: (-item[1], item[0])
+                )[:10]
+            ],
+            "low_text_ratio": len(low_ratio),
+            "ai_content_signals": len(ai_content),
         },
         fs,
     )
+
+
+def _theme_result(items, failures, note=None):
+    checked = len(items)
+    failed = len(failures)
+    return {
+        "percent": round((checked - failed) / checked * 100, 1) if checked else None,
+        "items_checked": checked,
+        "items_failed": failed,
+        "failing_items": failures[:20],
+        **({"note": note} if note else {}),
+    }
+
+
+def themes(snapshot_path, links_path=None, schema_path=None):
+    snap = load_snapshot(snapshot_path)
+    pages = snap["pages"]
+    host = snap.get("host", "")
+    html = {url: p for url, p in pages.items() if is_html_page(p)}
+
+    crawl_items = [url for url in pages if is_internal(url, host)]
+    crawl_failures = []
+    for url in crawl_items:
+        page = pages[url]
+        status = page.get("status")
+        reasons = []
+        if status is None or isinstance(status, int) and status >= 400:
+            reasons.append("bad-status")
+        if page.get("indexability_reason") == "robots-blocked":
+            reasons.append("robots-blocked")
+        if len(page.get("redirect_chain", [])) > 1:
+            reasons.append("redirect-chain")
+        if reasons:
+            crawl_failures.append({"url": url, "issues": reasons})
+
+    markup_result = _theme_result([], [])
+    if schema_path:
+        schema_data = json.loads(Path(schema_path).read_text(encoding="utf-8"))
+        summary = schema_data.get("summary", {})
+        checked = summary.get("items_checked")
+        failed = summary.get("items_failed")
+        if isinstance(checked, int) and isinstance(failed, int):
+            failing = []
+            for item in schema_data.get("findings", []):
+                failing.extend(item.get("details", []))
+                if len(failing) >= 20:
+                    break
+            markup_result = {
+                "percent": round((checked - failed) / checked * 100, 1) if checked else None,
+                "items_checked": checked,
+                "items_failed": failed,
+                "failing_items": failing[:20],
+            }
+        else:
+            markup_result = {
+                "percent": None,
+                "items_checked": None,
+                "items_failed": None,
+                "failing_items": [],
+                "note": "Schema input lacks items_checked/items_failed summary.",
+            }
+    else:
+        markup_result = {
+            "percent": None,
+            "items_checked": None,
+            "items_failed": None,
+            "failing_items": [],
+            "note": "Pass --schema for markup theme data.",
+        }
+
+    incoming = {url: [] for url in html}
+    broken_sources = {}
+    for source, page in html.items():
+        for link in page.get("links", []):
+            target = link.get("target")
+            if not link.get("internal"):
+                continue
+            target_page = pages.get(target)
+            if target in incoming:
+                incoming[target].append((source, not link.get("nofollow")))
+            status = target_page.get("status") if target_page else None
+            issue = (
+                "broken-link"
+                if status is None or isinstance(status, int) and status >= 400
+                else "redirect-link"
+                if isinstance(status, int) and 300 <= status < 400
+                else None
+            )
+            if issue:
+                broken_sources.setdefault(source, set()).add(issue)
+    internal_failures = []
+    for url, page in html.items():
+        issues = set(broken_sources.get(url, set()))
+        inlinks = incoming.get(url, [])
+        if not inlinks:
+            issues.add("no-inlink")
+        elif sum(1 for _, dofollow in inlinks if dofollow) == 1:
+            issues.add("one-dofollow-inlink")
+        if any(link.get("no_anchor") for link in page.get("links", [])):
+            issues.add("links-no-anchor")
+        if issues:
+            internal_failures.append({"url": url, "issues": sorted(issues)})
+
+    https_failures = []
+    for url in crawl_items:
+        page = pages[url]
+        issues = []
+        if (page.get("final_url") or url).lower().startswith("http://"):
+            issues.append("http-final-url")
+        if any(
+            link.get("internal") and link.get("target", "").lower().startswith("http://")
+            for link in page.get("links", [])
+        ):
+            issues.append("http-internal-link")
+        if issues:
+            https_failures.append({"url": url, "issues": issues})
+
+    performance_failures = []
+    for url, page in html.items():
+        issues = []
+        if page.get("response_ms", 0) > 1500:
+            issues.append("slow-response")
+        if page.get("html_bytes", 0) > 1024 * 1024:
+            issues.append("large-html")
+        if page.get("text_ratio", 0) < 0.10:
+            issues.append("low-text-ratio")
+        if issues:
+            performance_failures.append({"url": url, "issues": issues})
+
+    results = {
+        "crawlability": _theme_result(crawl_items, crawl_failures),
+        "markup": markup_result,
+        "internal_linking": _theme_result(list(html), internal_failures),
+        "https": _theme_result(crawl_items, https_failures),
+        "performance": _theme_result(list(html), performance_failures),
+    }
+    overall = [
+        {
+            "theme": name,
+            "percent": result["percent"],
+            "items_checked": result["items_checked"],
+            "items_failed": result["items_failed"],
+        }
+        for name, result in results.items()
+        if result["percent"] is not None
+    ]
+    overall.sort(key=lambda item: (item["percent"], item["theme"]))
+    source = {"snapshot": str(snapshot_path), "captured_at": snap.get("captured_at")}
+    if links_path:
+        source["links"] = str(links_path)
+    if schema_path:
+        source["schema"] = str(schema_path)
+    return {
+        "check": "themes",
+        "version": 1,
+        "site": snap.get("site"),
+        "generated_at": now_iso(),
+        "source": source,
+        "summary": {
+            "themes": {name: result["percent"] for name, result in results.items()},
+            "overall": overall,
+        },
+        "findings": [],
+        "themes": results,
+    }
 
 
 def diff(old_path, new_path, wc_pct, wc_min):
@@ -695,7 +1281,13 @@ def main():
     o = sub.add_parser("onpage")
     o.add_argument("snapshot")
     o.add_argument("--max-desc", type=int, default=160)
+    o.add_argument("--min-text-ratio", type=float, default=0.10)
     o.add_argument("--out")
+    t = sub.add_parser("themes")
+    t.add_argument("snapshot")
+    t.add_argument("--links")
+    t.add_argument("--schema")
+    t.add_argument("--out")
     d = sub.add_parser("diff")
     d.add_argument("paths", nargs="*")
     d.add_argument("--latest")
@@ -733,7 +1325,9 @@ def main():
             )
             return 0
         if args.cmd == "onpage":
-            result = onpage(args.snapshot, args.max_desc)
+            result = onpage(args.snapshot, args.max_desc, args.min_text_ratio)
+        elif args.cmd == "themes":
+            result = themes(args.snapshot, args.links, args.schema)
         else:
             if args.latest:
                 paths = list_snapshots(args.latest)

@@ -10,6 +10,7 @@ file and writes JSON that `seo-audit` merges into `findings/<category>.md` and
 CS="${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo"
 $CS run crawl_snapshot.py crawl <url> --max-pages 500 --out <domain>-audit/snapshots/
 $CS run crawl_snapshot.py onpage  <snapshot> --out findings/onpage.json
+$CS run crawl_snapshot.py themes  <snapshot> --schema findings/schema.json --out findings/themes.json
 $CS run crawl_snapshot.py diff --latest <domain>-audit/snapshots/ --out findings/changes.json
 $CS run link_audit.py <snapshot> --out findings/links.json
 $CS run schema_validate.py <snapshot> --out findings/schema.json
@@ -31,7 +32,8 @@ File `snapshot-YYYY-MM-DD.json` (`.json.gz` also accepted). Never edit by hand.
   "host": "example.com",
   "captured_at": "2026-10-24T12:00:00Z",  # UTC ISO
   "tool": {"name": "crawl_snapshot.py", "version": "1"},
-  "settings": {"max_pages": 500, "robots": true, "delay": 1.0, "user_agent": "..."},
+  "settings": {"max_pages": 500, "concurrency": 3, "robots": true, "robots_status": 200, "delay": 1.0, "user_agent": "..."},
+  "robots": {"url": "https://example.com/robots.txt", "status": 200, "bytes": 120, "text": "..."},
   "pages": {                               # key = normalized URL
     "https://example.com/about": {
       "url": "...", "status": 200, "final_url": "...",
@@ -48,7 +50,10 @@ File `snapshot-YYYY-MM-DD.json` (`.json.gz` also accepted). Never edit by hand.
       "links": [{"target": "https://example.com/x", "internal": true,
                  "nofollow": false, "text": "anchor (<=100 chars)"}],
       "jsonld": [ {...parsed block...} ],  # parsed JSON-LD blocks, raw
-      "jsonld_errors": ["block 2: Expecting ','..."]
+      "jsonld_errors": ["block 2: Expecting ','..."],
+      "html_bytes": 24000, "text_ratio": 0.125, "response_ms": 180,
+      "h2_count": 4, "question_headings": 2, "list_count": 1,
+      "has_byline": true, "has_date": true
     }
   },
   "referring_domains": {                   # optional
@@ -67,6 +72,11 @@ Rules:
   has `nofollow`, `ugc` or `sponsored`.
 - Word count = visible main text (nav, header, footer, script, style removed).
 - External links appear in `links` with `internal: false` and are not fetched by the crawl.
+- `robots.text` is capped at 64 KiB and is null when robots fetching is disabled. HTML `text_ratio` is visible UTF-8 text bytes divided by raw HTML bytes. `question_headings` is a count. `no_anchor: true` appears only on links without visible or accessible labels. `truncated: true` marks a body capped at 3 MiB.
+
+## Content and theme checks
+
+The `onpage` check adds `robots-syntax`, `links-no-anchor`, `duplicate-h1-title`, `low-text-ratio`, `nofollow-external`, `pages-blocked`, and `ai-content-signals`. `pages-blocked` uses separate `robots` and `noindex` scopes. AI content signals are a heuristic proxy, not Semrush's proprietary check. `themes <snapshot> [--links FILE] [--schema FILE]` reports crawlability, markup, internal_linking, https, and performance percentages plus failing items; markup is null without schema summary input.
 
 ## Check output contract (all check scripts)
 

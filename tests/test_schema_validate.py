@@ -9,7 +9,11 @@ VOCAB = {
         "Organization": {"p": ["Thing"], "d": ["url"]},
         "LocalBusiness": {"p": ["Organization"], "d": ["address"]},
         "WebPage": {"p": ["Thing"], "d": ["inLanguage"]},
-        "Article": {"p": ["Thing"], "d": ["headline"]},
+        "CreativeWork": {"p": ["Thing"], "d": ["inLanguage"]},
+        "Event": {"p": ["Thing"], "d": ["inLanguage"]},
+        "Article": {"p": ["CreativeWork"], "d": ["headline"]},
+        "LegalService": {"p": ["Organization"], "d": []},
+        "BreadcrumbList": {"p": ["Thing"], "d": []},
         "BlogPosting": {"p": ["Article"], "d": []},
         "ThingRef": {"p": ["Thing"], "d": []},
         "Product": {"p": ["Thing"], "d": ["offers", "aggregateRating"]},
@@ -65,6 +69,39 @@ def test_context_graph_array_types_properties_and_domain():
     bad = next(x for x in issues if x["code"] == "schema-property-invalid")
     assert bad["message"] == "Organization.inLanguage not defined for Organization"
     assert sum(x["code"] == "schema-required-missing" for x in issues) == 1
+
+
+def test_inlanguage_domain_errors_passes_and_item_counts():
+    blocks = [
+        {
+            "@context": "https://schema.org",
+            "@graph": [
+                {"@type": ["LegalService", "Organization"], "inLanguage": "en"},
+                {"@type": "BreadcrumbList", "inLanguage": "en"},
+                {"@type": "WebPage", "inLanguage": "en"},
+                {"@type": "Article", "inLanguage": "en"},
+            ],
+        }
+    ]
+    issues = validate(blocks, rules={})
+    invalid = [x for x in issues if x["code"] == "schema-property-invalid"]
+    assert [x["message"] for x in invalid] == [
+        "LegalService.inLanguage not defined for LegalService",
+        "BreadcrumbList.inLanguage not defined for BreadcrumbList",
+    ]
+    assert {"CreativeWork", "Event"}.issubset(invalid[0]["allowed_on"])
+    assert invalid[0]["fix"] == (
+        "remove the property from LegalService or move it to a WebPage/CreativeWork node."
+    )
+    _, summary = sv.summarize(
+        {"https://example.test/": issues},
+        items_by_page={"https://example.test/": sv.schema_items(blocks)},
+    )
+    assert (summary["items_checked"], summary["items_failed"], summary["items_passed"]) == (
+        5,
+        3,
+        2,
+    )
 
 
 def test_missing_context_unknown_type_prefixed_type_and_references():

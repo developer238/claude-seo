@@ -55,6 +55,182 @@ def test_extractor_fields_and_indexability():
     assert cs.indexability(p) == (False, "canonical-other")
 
 
+def test_extractor_additional_metrics_and_no_anchor_accessibility():
+    html = """<html><head><meta name="author" content="A"><meta property="article:published_time" content="2026-01-01"></head>
+    <body><main><h2>What is this?</h2><h3>More</h3><ul><li>One</li></ul>
+    <a href="/empty"><svg></svg></a><a href="/aria" aria-label="Label"></a>
+    <a href="/image"><img alt="Photo"></a><a href="/icon"><svg><title>Icon title</title></svg></a>
+    <a href="/by"><span>By Jane Doe</span></a></main></body></html>"""
+    result = cs.extract_html(
+        html, "https://example.com/p", "example.com", html_bytes=1000, response_ms=23
+    )
+    links = {link["target"].rsplit("/", 1)[-1]: link for link in result["links"]}
+    assert links["empty"]["no_anchor"] is True
+    assert all("no_anchor" not in links[key] for key in ("aria", "image", "icon", "by"))
+    assert (
+        result["h2_count"] == 1 and result["question_headings"] == 1 and result["list_count"] == 1
+    )
+    assert result["html_bytes"] == 1000 and result["response_ms"] == 23
+    assert result["has_byline"] and result["has_date"]
+
+
+def test_validate_robots_content_signal_and_directives():
+    valid = """User-agent: *
+Allow: /
+Disallow: /_md/
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
+
+Sitemap: https://saeedlawfirm.com/sitemap.xml
+Agentmap: https://saeedlawfirm.com/.well-known/ai-catalog.json"""
+    issues = cs.validate_robots(valid)
+    assert not [item for item in issues if item["severity"] == "High"]
+    assert (
+        next(item for item in issues if item["code"] == "unknown-directive")["severity"] == "Info"
+    )
+    bad = cs.validate_robots(
+        "Allow: x\nContent-Signal: ai-robots=maybe\nSitemap: /map.xml\nno colon"
+    )
+    assert {item["code"] for item in bad} >= {
+        "rule-before-user-agent",
+        "invalid-rule-value",
+        "invalid-content-signal",
+        "invalid-sitemap",
+        "missing-colon",
+    }
+
+
+def test_onpage_new_findings(tmp_path):
+    root = "https://example.com/"
+    article = "https://example.com/blog/post"
+    pages = {
+        root: dict(
+            page(root),
+            links=[
+                {
+                    "target": "https://outside.example/x",
+                    "internal": False,
+                    "nofollow": True,
+                    "no_anchor": True,
+                },
+                {"target": "https://example.com/missing", "internal": True, "nofollow": False},
+            ],
+        ),
+        article: dict(
+            page(article, title="Same | Brand", h1=["Same"], words=12),
+            h2_count=0,
+            jsonld=[],
+            question_headings=0,
+            list_count=0,
+            has_byline=False,
+            has_date=False,
+            html_bytes=1000,
+            text_ratio=0.02,
+            indexability_reason="ok",
+        ),
+        "https://example.com/blocked": {
+            "url": "https://example.com/blocked",
+            "status": None,
+            "indexable": False,
+            "indexability_reason": "robots-blocked",
+        },
+        "https://example.com/noindex": {
+            "url": "https://example.com/noindex",
+            "status": 200,
+            "content_type": "text/html",
+            "title": "x",
+            "indexable": False,
+            "indexability_reason": "noindex-header",
+        },
+    }
+    snap = snapshot(pages)
+    snap["robots"] = {
+        "url": "https://example.com/robots.txt",
+        "status": 200,
+        "bytes": 200,
+        "text": "Unknown: x",
+    }
+    path = tmp_path / "new-findings.json"
+    cs.save_snapshot(snap, path)
+    result = cs.onpage(str(path), 160)
+    ids = [item["id"] for item in result["findings"]]
+    assert {
+        "robots-syntax",
+        "links-no-anchor",
+        "duplicate-h1-title",
+        "low-text-ratio",
+        "nofollow-external",
+        "pages-blocked",
+        "ai-content-signals",
+    } <= set(ids)
+    assert result["summary"]["counts"]["links-no-anchor"] == 1
+    assert result["summary"]["nofollow_external_total"] == 1
+    assert result["summary"]["counts"]["pages-blocked-robots"] == 1
+    assert result["summary"]["counts"]["pages-blocked-noindex"] == 1
+
+
+def test_themes_theme_percentages(tmp_path):
+    root, child, orphan, broken = (
+        "https://example.com/",
+        "https://example.com/child",
+        "https://example.com/orphan",
+        "https://example.com/gone",
+    )
+    pages = {
+        root: dict(
+            page(root),
+            final_url=root,
+            redirect_chain=[],
+            html_bytes=100,
+            text_ratio=0.2,
+            response_ms=200,
+            links=[
+                {"target": child, "internal": True, "nofollow": False},
+                {"target": broken, "internal": True, "nofollow": False},
+                {"target": "http://example.com/insecure", "internal": True, "nofollow": False},
+            ],
+        ),
+        child: dict(
+            page(child),
+            final_url=child,
+            redirect_chain=[],
+            html_bytes=100,
+            text_ratio=0.2,
+            response_ms=200,
+            links=[],
+        ),
+        orphan: dict(
+            page(orphan),
+            final_url=orphan,
+            redirect_chain=[],
+            html_bytes=100,
+            text_ratio=0.2,
+            response_ms=200,
+            links=[],
+        ),
+        broken: {
+            "url": broken,
+            "status": 404,
+            "final_url": broken,
+            "redirect_chain": [],
+            "indexability_reason": "non-200",
+        },
+    }
+    snap_path = tmp_path / "themes.json"
+    schema_path = tmp_path / "schema.json"
+    cs.save_snapshot(snapshot(pages), snap_path)
+    schema_path.write_text(
+        json.dumps({"summary": {"items_checked": 4, "items_failed": 1}, "findings": []})
+    )
+    result = cs.themes(str(snap_path), schema_path=str(schema_path))
+    assert result["check"] == "themes"
+    assert result["summary"]["themes"]["crawlability"] == 75.0
+    assert result["summary"]["themes"]["markup"] == 75.0
+    assert result["themes"]["internal_linking"]["percent"] == 0.0
+    assert result["themes"]["https"]["percent"] == 75.0
+    assert result["themes"]["performance"]["percent"] == 100.0
+    assert result["summary"]["overall"][0]["theme"] == "internal_linking"
+
+
 def test_onpage_findings(tmp_path):
     pages = {
         "https://example.com/a": dict(
@@ -188,7 +364,9 @@ def test_seed_urls_expands_sitemap_index_and_urlset(monkeypatch):
         },
     )
     args = SimpleNamespace(no_robots=False, timeout=1, user_agent="TestBot", max_pages=10)
-    _, seeds, _ = cs.seed_urls("https://example.com/", args, "example.com", "https://example.com")
+    _, seeds, _, _ = cs.seed_urls(
+        "https://example.com/", args, "example.com", "https://example.com"
+    )
     assert seeds == ["https://example.com/", "https://example.com/a/", "https://example.com/b"]
 
 

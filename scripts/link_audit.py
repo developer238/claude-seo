@@ -284,11 +284,24 @@ def audit(
             if by_class[cls]:
                 details = by_class[cls]
                 pages_found = sorted({p for d in details for p in external_refs[d["url"]]})
+                unique_urls = len(details)
+                if cls == "blocked":
+                    title = (
+                        f"External URLs blocked for bots, not necessarily broken: "
+                        f"{unique_urls} URL{'s' if unique_urls != 1 else ''}, "
+                        f"linked from {len(pages_found)} pages; confirm manually"
+                    )
                 findings.append(
                     finding(
-                        fid, severity, title, pages_found, count=len(pages_found), details=details
+                        fid,
+                        severity,
+                        title,
+                        pages_found,
+                        count=unique_urls if cls == "blocked" else len(pages_found),
+                        details=details,
                     )
                 )
+                findings[-1]["unique_urls"] = unique_urls
         external_summary = {
             "classes": {
                 k: {
@@ -299,6 +312,7 @@ def audit(
             },
             "urls_checked": len(results),
             "truncated": truncated,
+            "blocked_urls": [d["url"] for d in by_class["blocked"][:30]],
         }
     for scope, index in (("indexable", 0), ("non-indexable", 1)):
         grouped = defaultdict(list)

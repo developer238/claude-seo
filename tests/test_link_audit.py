@@ -133,7 +133,7 @@ def test_external_classification(monkeypatch):
     monkeypatch.setattr(link_audit, "_probe", probe)
     result = link_audit.audit(snapshot(), "fixture", timeout=1, per_host_delay=0)
     by_id = {f["id"]: f for f in result["findings"]}
-    assert by_id["external-blocked"]["count"] == 1
+    assert by_id["external-blocked"]["count"] == 2
     assert by_id["external-4xx"]["details"][0]["final_status"] == 404
     assert "external-timeout" in by_id
     assert by_id["external-3xx"]["details"][0]["final_status"] == 200
@@ -162,3 +162,40 @@ def test_external_classification(monkeypatch):
         for d in f["details"]
         if "linked_from_count" in d
     )
+    assert all(
+        "unique_urls" in finding
+        for finding in result["findings"]
+        if finding["id"].startswith("external-")
+    )
+
+
+def test_repeated_429_is_one_blocked_url(monkeypatch):
+    class Response:
+        status_code = 429
+        headers = {"Retry-After": "60"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(link_audit, "_probe", lambda *args: Response())
+    root = "https://example.test/"
+    pages = {
+        root + f"page-{i}": {
+            "url": root + f"page-{i}",
+            "status": 200,
+            "content_type": "text/html",
+            "title": "page",
+            "indexable": True,
+            "links": [{"target": "https://wa.me/example", "internal": False}],
+        }
+        for i in range(50)
+    }
+    data = {"format": "claude-seo-snapshot/1", "site": root, "pages": pages}
+    result = link_audit.audit(data, "fixture", per_host_delay=0)
+    blocked = next(f for f in result["findings"] if f["id"] == "external-blocked")
+    assert blocked["count"] == blocked["unique_urls"] == 1
+    assert "1 URL, linked from 50 pages" in blocked["title"]
+    assert blocked["details"][0]["linked_from_count"] == 50
+    assert not any(f["id"] == "external-4xx" for f in result["findings"])
+    assert result["summary"]["external"]["classes"]["blocked"]["source_pages"] == 50
+    assert result["summary"]["external"]["blocked_urls"] == ["https://wa.me/example"]

@@ -193,6 +193,25 @@ def nodes_in(obj):
                 yield from nodes_in(v)
 
 
+def schema_items(blocks):
+    """One item per top-level typed node and type (Semrush counts items this way).
+
+    Each entry is (root node id, type, ids of the root and every node nested in it),
+    so an error on a nested node fails the item that contains it.
+    """
+    items = []
+    for block in blocks or []:
+        if not (isinstance(block, dict) and schema_context(block.get("@context"))):
+            continue
+        roots = block["@graph"] if isinstance(block.get("@graph"), list) else [block]
+        for root in roots:
+            if not (isinstance(root, dict) and "@type" in root):
+                continue
+            owned = {id(n) for n in nodes_in(root)} | {id(root)}
+            items.extend((id(root), typ, owned) for typ in types_of(root))
+    return items
+
+
 def types_of(node):
     vals = node.get("@type", [])
     vals = vals if isinstance(vals, list) else [vals]
@@ -259,6 +278,7 @@ def validate_page(url, blocks, syntax, vocab, rules):
                 "kind": "google"
                 if code in ("schema-required-missing", "schema-recommended-missing")
                 else "schemaorg",
+                "_node_id": id(node) if isinstance(node, dict) and "@type" in node else None,
                 **({"suggestion": suggestion} if suggestion else {}),
             }
         )
@@ -306,6 +326,11 @@ def validate_page(url, blocks, syntax, vocab, rules):
                         prop, vocab.get("props", {}), n=1, cutoff=0.65
                     )
                     typ = ts[0]
+                    allowed_on = [
+                        name
+                        for name, data in vocab.get("types", {}).items()
+                        if prop in data.get("d", [])
+                    ][:5]
                     add(
                         "schema-property-invalid",
                         "High",
@@ -314,6 +339,11 @@ def validate_page(url, blocks, syntax, vocab, rules):
                         "%s.%s not defined for %s" % (typ, prop, typ),
                         "Did you mean %s?" % close[0] if close else None,
                         typ,
+                    )
+                    issues[-1]["allowed_on"] = allowed_on
+                    issues[-1]["fix"] = (
+                        "remove the property from %s or move it to a WebPage/CreativeWork node."
+                        % typ
                     )
                     continue
                 ranges = vocab.get("props", {}).get(prop, [])
@@ -407,9 +437,10 @@ def validate_page(url, blocks, syntax, vocab, rules):
     return issues
 
 
-def summarize(pages, errors_only=False):
+def summarize(pages, errors_only=False, items_by_page=None):
     grouped, per, by_type = {}, {}, {}
     schema_error_pages, google_error_pages = set(), set()
+    items_checked = items_failed = 0
     for url, issues in pages.items():
         if errors_only:
             issues = [i for i in issues if i["severity"] == "High"]
@@ -420,7 +451,9 @@ def summarize(pages, errors_only=False):
         for i in issues:
             item = grouped.setdefault(i["code"], {"pages": set(), "details": []})
             item["pages"].add(url)
-            item["details"].append({k: v for k, v in i.items() if k != "code"})
+            item["details"].append(
+                {k: v for k, v in i.items() if k != "code" and not k.startswith("_")}
+            )
             if i["severity"] == "High":
                 if i["kind"] == "schemaorg":
                     schema_error_pages.add(url)
@@ -428,6 +461,14 @@ def summarize(pages, errors_only=False):
                     google_error_pages.add(url)
                 for t in filter(None, i["node"].split(",")):
                     by_type[t] = by_type.get(t, 0) + 1
+        page_items = (items_by_page or {}).get(url, [])
+        failed_nodes = {
+            i.get("_node_id")
+            for i in issues
+            if i.get("severity") == "High" and i.get("kind") in ("schemaorg", "google")
+        }
+        items_checked += len(page_items)
+        items_failed += sum(bool(owned & failed_nodes) for _, _, owned in page_items)
     findings = [
         finding(
             code,
@@ -442,6 +483,9 @@ def summarize(pages, errors_only=False):
     ]
     return findings, {
         "pages_checked": len(pages),
+        "items_checked": items_checked,
+        "items_failed": items_failed,
+        "items_passed": items_checked - items_failed,
         "pages_with_schemaorg_errors": len(schema_error_pages),
         "pages_with_google_errors": len(google_error_pages),
         "pages_with_warnings": sum(x["warnings"] > 0 for x in per.values()),
@@ -472,6 +516,7 @@ def main():
         vocab = get_data(a.vocab, "vocab")
         rules = get_data(a.rules, "rules")
         pages = {}
+        items_by_page = {}
         snap = None
         source = {}
         if a.html:
@@ -482,6 +527,7 @@ def main():
             blocks, syntax = extract_jsonld(html)
             for url in urls:
                 pages[url] = validate_page(url, blocks, syntax, vocab, rules)
+                items_by_page[url] = schema_items(blocks)
             source = {"urls": urls}
         elif a.inputs and a.inputs[0].startswith(("http://", "https://")):
             urls = a.inputs + (a.url or [])
@@ -491,6 +537,7 @@ def main():
                 response.raise_for_status()
                 blocks, syntax = extract_jsonld(response.text)
                 pages[url] = validate_page(url, blocks, syntax, vocab, rules)
+                items_by_page[url] = schema_items(blocks)
             source = {"urls": urls}
         else:
             if len(a.inputs) != 1:
@@ -499,10 +546,12 @@ def main():
             source = a.inputs[0]
             for url, page in snap["pages"].items():
                 if is_html_page(page):
+                    blocks = page.get("jsonld", [])
                     pages[url] = validate_page(
-                        url, page.get("jsonld", []), page.get("jsonld_errors", []), vocab, rules
+                        url, blocks, page.get("jsonld_errors", []), vocab, rules
                     )
-        findings, summary = summarize(pages, a.errors_only)
+                    items_by_page[url] = schema_items(blocks)
+        findings, summary = summarize(pages, a.errors_only, items_by_page)
         result = (
             envelope("schema", snap, source, summary, findings)
             if snap
