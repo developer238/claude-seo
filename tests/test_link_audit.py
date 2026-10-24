@@ -199,3 +199,102 @@ def test_repeated_429_is_one_blocked_url(monkeypatch):
     assert not any(f["id"] == "external-4xx" for f in result["findings"])
     assert result["summary"]["external"]["classes"]["blocked"]["source_pages"] == 50
     assert result["summary"]["external"]["blocked_urls"] == ["https://wa.me/example"]
+
+
+def test_external_timeout_retry(monkeypatch):
+    calls = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def close(self):
+            pass
+
+    def probe(url, method, ua, timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise requests.exceptions.Timeout("slow first attempt")
+        return Response()
+
+    monkeypatch.setattr(link_audit, "_probe", probe)
+    result = link_audit._external("https://ext.test/slow", 12, 0)
+    assert result["class"] == "ok"
+    assert result["attempts"] == 2
+    assert calls == [12, 24]
+
+
+def test_external_timeout_after_retry(monkeypatch):
+    calls = []
+
+    def probe(url, method, ua, timeout):
+        calls.append(timeout)
+        raise requests.exceptions.Timeout("still slow")
+
+    monkeypatch.setattr(link_audit, "_probe", probe)
+    result = link_audit._external("https://ext.test/slow", 12, 0)
+    assert result["class"] == "timeout"
+    assert result["attempts"] == 2
+    assert calls == [12, 24]
+
+
+def test_external_redirect_loop(monkeypatch):
+    class Response:
+        status_code = 302
+
+        def __init__(self, url):
+            self.headers = {
+                "Location": "https://ext.test/again"
+                if url.endswith("/start")
+                else "https://ext.test/start"
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(link_audit, "_probe", lambda url, method, ua, timeout: Response(url))
+    result = link_audit._external("https://ext.test/start", 12, 0)
+    assert result["class"] == "redirect-loop"
+    assert result["attempts"] == 1
+    assert len(result["hops"]) >= 2
+    data = {
+        "format": "claude-seo-snapshot/1",
+        "site": "https://example.test/",
+        "pages": {
+            "https://example.test/": {
+                "status": 200,
+                "content_type": "text/html",
+                "title": "home",
+                "indexable": True,
+                "links": [{"target": "https://ext.test/start", "internal": False}],
+            }
+        },
+    }
+    audited = link_audit.audit(data, "fixture", per_host_delay=0)
+    loop_finding = next(f for f in audited["findings"] if f["id"] == "external-redirect-loop")
+    assert loop_finding["severity"] == "Medium"
+    assert loop_finding["details"][0]["hops"]
+
+
+def test_external_5xx_retry(monkeypatch):
+    calls = []
+
+    class Response:
+        headers = {}
+
+        def __init__(self, status):
+            self.status_code = status
+
+        def close(self):
+            pass
+
+    def probe(url, method, ua, timeout):
+        calls.append(timeout)
+        return Response(500 if timeout == 12 else 200)
+
+    monkeypatch.setattr(link_audit, "_probe", probe)
+    monkeypatch.setattr(link_audit.time, "sleep", lambda seconds: None)
+    result = link_audit._external("https://ext.test/transient", 12, 0)
+    assert result["class"] == "ok"
+    assert result["attempts"] == 2
+    assert calls == [12, 12, 24]

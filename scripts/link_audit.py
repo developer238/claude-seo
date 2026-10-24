@@ -60,7 +60,7 @@ def _polite_probe(url, method, ua, timeout, delay):
 
 
 def _follow_external(url, timeout, delay):
-    chain, current = [], url
+    chain, current, seen = [], url, {url}
     for hop in range(6):
         response = _polite_probe(current, "HEAD", _UA, timeout, delay)
         if response.status_code >= 400 or response.status_code == 405:
@@ -72,12 +72,19 @@ def _follow_external(url, timeout, delay):
         if status not in (301, 302, 303, 307, 308) or not location:
             return chain, current, status, headers, None
         chain.append({"url": current, "status": status})
-        current = urljoin(current, location)
+        next_url = urljoin(current, location)
+        if next_url in seen:
+            chain.append({"url": next_url, "status": status})
+            return chain, next_url, status, headers, "redirect-loop"
+        current = next_url
+        seen.add(current)
         if hop == 5:
-            return chain, current, status, headers, "too many redirects"
+            return chain, current, status, headers, "redirect-loop"
 
 
 def _classify_external(status, headers, chain, error):
+    if error == "redirect-loop":
+        return "redirect-loop"
     if error:
         return "error"
     blocked = status in (401, 403, 429, 999) or (
@@ -93,21 +100,35 @@ def _classify_external(status, headers, chain, error):
     return "redirect" if chain else "ok"
 
 
-def _external(url, timeout, delay):
+def _external(url, timeout, delay, retry=True):
     import requests
 
-    chain, current, error, headers = [], url, None, {}
-    try:
-        chain, current, status, headers, error = _follow_external(url, timeout, delay)
-        cls = _classify_external(status, headers, chain, error)
-    except URLSafetyError as exc:
-        cls, status, error = "error", None, str(exc)
-    except requests.exceptions.Timeout as exc:
-        cls, status, error = "timeout", None, str(exc)
-    except requests.exceptions.RequestException as exc:
-        cls, status, error = "error", None, str(exc)
-    except Exception as exc:
-        cls, status, error = "error", None, str(exc)
+    chain, current, error, headers, status = [], url, None, {}, None
+    attempts = 0
+    while True:
+        attempts += 1
+        retryable = False
+        try:
+            chain, current, status, headers, error = _follow_external(
+                url, timeout * (2 if attempts > 1 else 1), delay
+            )
+            cls = _classify_external(status, headers, chain, error)
+            if retry and attempts == 1 and cls == "5xx":
+                time.sleep(2)
+                continue
+        except URLSafetyError as exc:
+            cls, status, error = "error", None, str(exc)
+        except requests.exceptions.Timeout as exc:
+            cls, status, error = "timeout", None, str(exc)
+            retryable = True
+        except requests.exceptions.RequestException as exc:
+            cls, status, error = "error", None, str(exc)
+            retryable = True
+        except Exception as exc:
+            cls, status, error = "error", None, str(exc)
+        if retry and attempts == 1 and retryable:
+            continue
+        break
     return {
         "class": cls,
         "status": chain[0]["status"] if chain else status,
@@ -116,6 +137,7 @@ def _external(url, timeout, delay):
         "hops": chain,
         "via_redirect": bool(chain),
         "error": error,
+        "attempts": attempts,
     }
 
 
@@ -128,6 +150,7 @@ def audit(
     timeout=12,
     concurrency=8,
     per_host_delay=0.5,
+    no_retry=False,
 ):
     pages = snapshot["pages"]
     sources = [(u, p) for u, p in pages.items() if is_html_page(p)]
@@ -244,7 +267,11 @@ def audit(
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-            results = list(pool.map(lambda u: (u, _external(u, timeout, per_host_delay)), urls))
+            results = list(
+                pool.map(
+                    lambda u: (u, _external(u, timeout, per_host_delay, retry=not no_retry)), urls
+                )
+            )
         by_class = defaultdict(list)
         for url, result in results:
             linked_from = sorted(external_refs[url])
@@ -271,9 +298,22 @@ def audit(
         ext_ids = {
             "4xx": ("external-4xx", "Medium", "External links return 4xx responses"),
             "redirect": ("external-3xx", "Low", "External links redirect"),
+            "redirect-loop": (
+                "external-redirect-loop",
+                "Medium",
+                "External redirect loop, effectively broken",
+            ),
             "5xx": ("external-5xx", "Low", "External links return 5xx responses"),
-            "timeout": ("external-timeout", "Low", "External links time out"),
-            "error": ("external-error", "Low", "External links have connection errors"),
+            "timeout": (
+                "external-timeout",
+                "Low",
+                "External links time out; check ran from this machine and may be geo/rate limited, confirm from another network",
+            ),
+            "error": (
+                "external-error",
+                "Low",
+                "External links have connection errors; check ran from this machine and may be geo/rate limited, confirm from another network",
+            ),
             "blocked": (
                 "external-blocked",
                 "Info",
@@ -375,6 +415,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=12)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--per-host-delay", type=float, default=0.5)
+    parser.add_argument("--no-retry", action="store_true")
     parser.add_argument("--out")
     args = parser.parse_args()
     try:
@@ -395,6 +436,7 @@ def main():
                 timeout=args.timeout,
                 concurrency=args.concurrency,
                 per_host_delay=args.per_host_delay,
+                no_retry=args.no_retry,
             ),
             args.out,
         )
