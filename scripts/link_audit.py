@@ -354,22 +354,29 @@ def audit(
             "truncated": truncated,
             "blocked_urls": [d["url"] for d in by_class["blocked"][:30]],
         }
+    internal_redirect_pages, external_redirect_pages = {}, {}
     for scope, index in (("indexable", 0), ("non-indexable", 1)):
-        grouped = defaultdict(list)
-        internal_pages, external_pages = set(), set()
+        grouped_internal = defaultdict(list)
+        scope_internal_pages, scope_external_pages = set(), set()
         for source, target in redirects[scope]:
-            grouped[source].append(target)
-            (internal_pages if target["kind"] == "internal" else external_pages).add(source)
-        if grouped:
+            if target["kind"] == "internal":
+                grouped_internal[source].append(target)
+                scope_internal_pages.add(source)
+            else:
+                scope_external_pages.add(source)
+        internal_redirect_pages[scope] = len(scope_internal_pages)
+        external_redirect_pages[scope] = len(scope_external_pages)
+        if grouped_internal:
             details = [
-                {"source": source, "targets": targets[:20]} for source, targets in grouped.items()
+                {"source": source, "targets": targets[:20]}
+                for source, targets in grouped_internal.items()
             ]
             findings.append(
                 finding(
                     "links-to-redirect",
                     ("Medium", "Low")[index],
-                    "Links point to redirects" + (" (internal links only)" if no_external else ""),
-                    list(grouped),
+                    "Internal links point to redirects",
+                    list(grouped_internal),
                     scope=scope,
                     recommendation="Update the href to the final URL.",
                     details=details,
@@ -382,20 +389,14 @@ def audit(
             "no-internal-inlinks",
         ):
             internal_counts[item["id"]][item["scope"]] = item["count"]
-    internal_pages = {}
-    external_pages = {}
     for scope in ("indexable", "non-indexable"):
-        internal_pages[scope] = len(
-            {source for source, target in redirects[scope] if target["kind"] == "internal"}
-        )
-        external_pages[scope] = len(
-            {source for source, target in redirects[scope] if target["kind"] == "external"}
-        )
-        internal_counts["links-to-redirect"][scope] = len(
-            {source for source, _ in redirects[scope]}
-        )
-    internal_counts["links_to_redirect_internal_pages"] = internal_pages
-    internal_counts["links_to_redirect_external_pages"] = external_pages
+        internal_counts["links-to-redirect"][scope] = internal_redirect_pages[scope]
+    internal_counts["links_to_redirect_any_pages"] = {
+        scope: len({source for source, _ in redirects[scope]})
+        for scope in ("indexable", "non-indexable")
+    }
+    internal_counts["links_to_redirect_internal_pages"] = internal_redirect_pages
+    internal_counts["links_to_redirect_external_pages"] = external_redirect_pages
     summary = {
         "internal": {
             "findings": dict(internal_counts),

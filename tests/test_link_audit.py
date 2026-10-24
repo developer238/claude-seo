@@ -103,7 +103,7 @@ def test_internal_findings_and_scopes():
     assert "one-dofollow-inlink" in [f["id"] for f in result["findings"]]
     assert "no-internal-inlinks" in [f["id"] for f in result["findings"]]
     assert result["summary"]["internal"]["pages_checked"] == 6
-    assert "internal links only" in finds[("links-to-redirect", "indexable")]["title"]
+    assert finds[("links-to-redirect", "indexable")]["title"] == "Internal links point to redirects"
     assert finds[("links-to-broken", "non-indexable")]["count"] == 1
 
 
@@ -144,11 +144,12 @@ def test_external_classification(monkeypatch):
         if f["id"] == "links-to-redirect"
         for d in f["details"]
     }
-    assert redirects[("indexable", "https://example.test/")]["targets"][-1]["kind"] == "external"
+    assert redirects[("indexable", "https://example.test/")]["targets"][-1]["kind"] == "internal"
     counts = result["summary"]["internal"]["findings"]
     assert counts["links_to_redirect_external_pages"]["indexable"] == 1
     assert counts["links_to_redirect_external_pages"]["non-indexable"] == 1
     assert counts["links_to_redirect_internal_pages"]["indexable"] == 1
+    assert counts["links_to_redirect_any_pages"] == {"indexable": 1, "non-indexable": 1}
     assert any(
         d["final_status"] == 403 and d["class"] == "redirect"
         for d in by_id["external-3xx"]["details"]
@@ -167,6 +168,44 @@ def test_external_classification(monkeypatch):
         for finding in result["findings"]
         if finding["id"].startswith("external-")
     )
+
+
+def test_external_redirect_is_not_in_action_finding(monkeypatch):
+    class Response:
+        headers = {"Location": "https://ext.test/final"}
+
+        def __init__(self, status):
+            self.status_code = status
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        link_audit,
+        "_probe",
+        lambda url, method, ua, timeout: Response(301 if url.endswith("/old") else 200),
+    )
+    root = "https://example.test/"
+    data = {
+        "format": "claude-seo-snapshot/1",
+        "site": root,
+        "pages": {
+            root: {
+                "status": 200,
+                "content_type": "text/html",
+                "title": "home",
+                "indexable": True,
+                "links": [{"target": "https://ext.test/old", "internal": False}],
+            }
+        },
+    }
+    result = link_audit.audit(data, "fixture", per_host_delay=0)
+    assert not any(f["id"] == "links-to-redirect" for f in result["findings"])
+    assert any(f["id"] == "external-3xx" for f in result["findings"])
+    counts = result["summary"]["internal"]["findings"]
+    assert counts["links_to_redirect_any_pages"] == {"indexable": 1, "non-indexable": 0}
+    assert counts["links_to_redirect_internal_pages"] == {"indexable": 0, "non-indexable": 0}
+    assert counts["links_to_redirect_external_pages"] == {"indexable": 1, "non-indexable": 0}
 
 
 def test_repeated_429_is_one_blocked_url(monkeypatch):
