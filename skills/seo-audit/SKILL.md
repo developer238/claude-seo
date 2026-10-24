@@ -16,7 +16,7 @@ metadata:
 
 1. **Render homepage**: use `"${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo" run render_page.py <url> --mode auto --json` to capture raw HTML, rendered HTML, extracted text, SPA status, and accessibility data when needed
 2. **Detect business type**: analyze homepage signals per seo orchestrator
-3. **Crawl site**: follow internal links up to 500 pages, respect robots.txt
+3. **Crawl site**: follow internal links up to 500 pages, respect robots.txt. Write the dated snapshot (see Site-Wide Checks)
 4. **Delegate to subagents** (if available, otherwise run inline sequentially):
    - `seo-technical` -- robots.txt, sitemaps, canonicals, Core Web Vitals, security headers
    - `seo-content` -- E-E-A-T, readability, thin content, AI citation readiness
@@ -49,6 +49,25 @@ Timeout per page: 30 seconds
 Concurrent requests: 5
 Delay between requests: 1 second
 ```
+
+## Site-Wide Checks (crawl snapshot)
+
+`crawl_snapshot.py` writes one dated snapshot (`snapshot-YYYY-MM-DD.json`); every check below reads it and writes JSON with `findings[]` to merge into `findings/*.md` and `audit-data.json`. Format, finding ids and thresholds: `references/crawl-snapshot.md`.
+
+```bash
+CS="${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo"
+$CS run crawl_snapshot.py crawl <url> --max-pages 500 --out {domain}-audit/snapshots/
+$CS run crawl_snapshot.py onpage {domain}-audit/snapshots/snapshot-<date>.json --out {domain}-audit/findings/onpage.json
+$CS run link_audit.py <snapshot> --out {domain}-audit/findings/links.json
+$CS run schema_validate.py <snapshot> --out {domain}-audit/findings/schema.json
+$CS run serp_title_check.py <snapshot> --serp <stored-serp.json> --out {domain}-audit/findings/serp-titles.json
+$CS run crawl_snapshot.py diff --latest {domain}-audit/snapshots/ --out {domain}-audit/findings/changes.json
+$CS run indexnow_submit.py --check <url> --changes {domain}-audit/findings/changes.json --out {domain}-audit/findings/indexnow.json
+```
+
+- Re-audit: crawl into the same folder, then `diff --latest` (title, meta description, H1, word-count changes, new and lost pages and referring domains). First crawl has no baseline: say so.
+- Report internal-link counts split by indexable vs non-indexable source page; external 403/429/999 are bot-blocks, never "broken".
+- SERP titles: use stored SERP data (DataForSEO organic pulls, `seo.pulls`); no new paid calls.
 
 ## Output Files
 

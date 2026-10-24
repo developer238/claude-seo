@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Site-wide audit checks that run from one dated crawl snapshot
+  (`claude-seo-snapshot/1`, see `skills/seo-audit/references/crawl-snapshot.md`):
+  - `crawl_snapshot.py`: robots-aware crawler, `onpage` (meta description too
+    long, missing title or description) and `diff` (title, meta description,
+    H1 and word-count changes, new and lost pages and referring domains).
+  - `link_audit.py`: internal links to broken or redirecting URLs split by
+    indexable vs non-indexable source page, pages with one dofollow inlink,
+    and external links by class (4xx, 3xx, 5xx, timeout, error, bot-block).
+  - `schema_validate.py`: per-page JSON-LD validation against the schema.org
+    vocabulary and Google's required and recommended properties
+    (`data/schemaorg-vocab.json`, `data/google-rich-results.json`).
+  - `serp_title_check.py`: page title vs the title in stored SERP data.
+  - `indexnow_submit.py --check`: key file and endpoint detection, changed
+    pages never submitted; submissions are now logged to a local ledger.
+
 ## [2.4.2] - 2026-10-04
 
 seo-cockpit, Google sign-in through your own account, and a schema-hook fix.

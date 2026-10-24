@@ -98,6 +98,7 @@ Allow: /
   interpret an unchanged canonical immediately after a fix as proof that the
   fix failed.
 - Thin content: pages below minimum word counts per type
+- Only one dofollow incoming internal link, split by indexable vs not (`link_audit.py`, finding `one-dofollow-inlink`); pages with none are orphans
 - Pagination: crawlable `<a href>` links to each page (Google no longer uses rel=next/prev; it announced this in 2019); give each page a self-referencing canonical; load-more and infinite scroll need paginated URLs behind them
 - Hreflang: correct for multi-language/multi-region sites
 - Index bloat: unnecessary pages consuming crawl budget
@@ -119,6 +120,11 @@ Allow: /
 - Redirects: no chains (max 1 hop), 301 for permanent moves
 - URL length: flag >100 characters
 - Trailing slashes: consistent usage
+
+#### Link Health
+Run `crawl_snapshot.py crawl <url>` then `link_audit.py <snapshot>` (see `seo-audit/references/crawl-snapshot.md`).
+- Internal links to broken pages (`links-to-broken`) and to redirecting URLs (`links-to-redirect`): count source pages split by indexable vs non-indexable; fix the href to the final URL (a trailing-slash 308 on a nav link affects every page)
+- External links by class, reported separately: 4xx, 3xx, 5xx, timeout, connection error. 403, 429 and 999 are bot-blocks (`external-blocked`), not broken links; confirm those in a browser
 
 ### 5. Mobile Optimization & Page Experience
 - Responsive design: viewport meta tag, responsive CSS
@@ -143,6 +149,7 @@ Allow: /
 ### 7. Structured Data
 - Detection: JSON-LD (preferred), Microdata, RDFa
 - Validation against Google's supported types
+- Per-page schema.org and Google property validation: `schema_validate.py <snapshot or url>` (unknown types, properties not defined for the type, missing required and recommended properties)
 - See seo-schema skill for full analysis
 
 ### 8. JavaScript Rendering
@@ -180,6 +187,7 @@ Google updated its JavaScript SEO documentation in December 2025 with critical c
 - Check if site supports IndexNow for Bing, Yandex, Naver
 - Supported by search engines other than Google
 - Recommend implementation for faster indexing on non-Google engines
+- Detect the key file and endpoint, and list changed pages never submitted (read-only, submits nothing): `"${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo" run indexnow_submit.py --check <url> [--changes changes.json]`. Submissions made with `indexnow_submit.py` are logged to `~/.config/claude-seo/indexnow-log.jsonl`; pages absent from the log count as never submitted
 
 ## Agent-Friendly Pages & Agentic Browsing
 

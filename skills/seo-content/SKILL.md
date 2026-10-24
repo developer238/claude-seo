@@ -189,6 +189,10 @@ Optimize for AI search engines (ChatGPT, Perplexity, Google AI Overviews):
 **Generative Engine Optimization (GEO):**
 Per Google's AI optimization guide, "optimizing for generative AI search is optimizing for the search experience, and thus still SEO": AI Overviews and AI Mode are grounded in the same ranking and quality systems as classic Search. The optimization signals that matter (quotability, attribution, heading hierarchy, freshness) are SEO fundamentals applied to AI-search surfaces, not a separate discipline. Cross-reference the `seo-geo` skill for detailed workflows; both surfaces share the primary-source synthesis in `${CLAUDE_PLUGIN_ROOT}/skills/seo-geo/references/google-ai-optimization-guide.md`.
 
+## Content Change Tracking
+
+Between audits, `crawl_snapshot.py diff --latest <dir>` reports pages whose title, meta description, H1 or word count (10% and 50 words) changed, plus new and removed pages. Use it to confirm edits shipped and to spot unplanned content changes.
+
 ## Content Freshness
 
 - Publication date visible

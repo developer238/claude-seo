@@ -36,6 +36,7 @@ metadata:
   - Relative URLs (should be absolute)
   - Invalid date formats
 - Flag deprecated types (see below)
+- Run the validator per page: `"${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo" run schema_validate.py <url>` (or a crawl snapshot for every page). It checks types and properties against the schema.org vocabulary (`${CLAUDE_PLUGIN_ROOT}/data/schemaorg-vocab.json`) and Google's required and recommended properties (`${CLAUDE_PLUGIN_ROOT}/data/google-rich-results.json`) and lists errors per page. Parsing as JSON is not validation
 
 ## Schema Type Status (as of June 2026)
 

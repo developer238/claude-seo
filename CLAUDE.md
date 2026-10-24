@@ -90,7 +90,7 @@ claude-seo/
     seo-flow.md                  # FLOW framework integration
   hooks/                           # Quality gate hooks
     hooks.json                   # PostToolUse schema validation
-  scripts/                         # 61 Python execution scripts
+  scripts/                         # 66 Python execution scripts
     google_auth.py               # Credential management (OAuth, SA, API key, 4-tier detection)
     backlinks_auth.py            # Backlink API credential management (Moz, Bing)
     moz_api.py                   # Moz Link Explorer API (DA/PA, spam, domains, anchors)
@@ -130,17 +130,22 @@ claude-seo/
     agentic_check.py             # Agent-readiness HTTP auditor (robots, llms.txt, Markdown, ARD, well-known, WebMCP)
     agentic_fix.py               # Agent-readiness fix drafter (robots Content-Signal, llms.txt, ai-catalog, WebMCP)
     lighthouse_agentic.py        # Lighthouse Agentic Browsing fraction reader (PSI or saved JSON)
+    link_audit.py                # Internal link status, one-inlink pages, external link classes (4xx, 3xx, timeout, bot-block)
     content_quality.py           # QRG-aligned content quality detector
     metadata_template.py         # Templated title/description detector (title echo + stock CTA)
     content_humanize.py          # AI-pattern remover (rewrites AI-typical phrasing)
     content_verify.py            # Claim extractor + citation-gap detector
+    crawl_snapshot.py            # Site crawler, dated snapshot (claude-seo-snapshot/1), onpage and diff checks
     schema_generate.py           # JSON-LD generators for high-leverage v2 schema types
     schema_ecommerce_validate.py # Product schema validator (merchant-listing requirements)
+    schema_validate.py           # Per-page schema.org and Google property validation (data/schemaorg-vocab.json)
     iptc_ai_label.py             # IPTC DigitalSourceType audit/injection for AI imagery
     parasite_risk.py             # Parasite-SEO risk scanner
     gbp_deprecation_lint.py      # GBP feature-deprecation linter
     domain_history.py            # Expired-domain heritage check
     seo_updates.py               # Primary-source Google updates query tool
+    serp_title_check.py          # Page title vs stored SERP title mismatch check
+    snapshot_io.py               # Shared snapshot load/save/normalise helpers for the audit checks
     indexnow_submit.py           # IndexNow submitter
     ucp_check.py                 # UCP (Universal Commerce Protocol) profile auditor
     unlighthouse_run.py          # Unlighthouse CLI wrapper (site-wide Lighthouse)

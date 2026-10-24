@@ -1,0 +1,164 @@
+import requests
+
+from scripts import link_audit
+
+
+def snapshot():
+    root = "https://example.test/"
+    pages = {
+        root: {
+            "url": root,
+            "status": 200,
+            "content_type": "text/html",
+            "title": "root",
+            "indexable": True,
+            "links": [
+                {"target": root + "missing", "internal": True, "text": "bad"},
+                {"target": root + "old", "internal": True, "text": "redirect"},
+                {
+                    "target": root + "nofollow",
+                    "internal": True,
+                    "nofollow": True,
+                    "text": "nofollow",
+                },
+                {"target": "https://ext.test/blocked", "internal": False},
+                {"target": "https://ext.test/999", "internal": False},
+                {"target": "https://ext.test/404", "internal": False},
+                {"target": "https://ext.test/go", "internal": False},
+                {"target": "https://ext.test/timeout", "internal": False},
+                {"target": "https://ext.test/go-blocked", "internal": False},
+                {"target": "https://ext.test/go-404", "internal": False},
+            ],
+        },
+        root + "noindex": {
+            "url": root + "noindex",
+            "status": 200,
+            "content_type": "text/html",
+            "title": "n",
+            "indexable": False,
+            "links": [
+                {"target": root + "old", "internal": True},
+                {"target": root + "missing", "internal": True},
+                {"target": "https://ext.test/go", "internal": False},
+            ],
+        },
+        root + "missing": {"status": 404, "indexability_reason": "non-200"},
+        root + "old": {
+            "status": 308,
+            "redirect_to": root + "old/",
+            "redirect_chain": [{"url": root + "old", "status": 308}],
+        },
+        root + "nofollow": {
+            "url": root + "nofollow",
+            "status": 200,
+            "content_type": "text/html",
+            "title": "f",
+            "indexable": True,
+            "links": [],
+        },
+        root + "one": {
+            "url": root + "one",
+            "status": 200,
+            "content_type": "text/html",
+            "title": "one",
+            "indexable": True,
+            "links": [],
+        },
+        root + "two": {
+            "url": root + "two",
+            "status": 200,
+            "content_type": "text/html",
+            "title": "two",
+            "indexable": True,
+            "links": [],
+        },
+        root + "orphan": {
+            "url": root + "orphan",
+            "status": 200,
+            "content_type": "text/html",
+            "title": "o",
+            "indexable": True,
+            "links": [],
+        },
+    }
+    pages[root]["links"].extend(
+        [
+            {"target": root + "one", "internal": True, "text": "one"},
+            {"target": root + "two", "internal": True, "nofollow": True, "text": "two"},
+        ]
+    )
+    return {
+        "format": "claude-seo-snapshot/1",
+        "site": root,
+        "captured_at": "2026-10-24T00:00:00Z",
+        "pages": pages,
+    }
+
+
+def test_internal_findings_and_scopes():
+    result = link_audit.audit(snapshot(), "fixture", no_external=True)
+    finds = {(f["id"], f["scope"]): f for f in result["findings"]}
+    assert finds[("links-to-broken", "indexable")]["details"][0]["targets"][0]["status"] == 404
+    assert finds[("links-to-redirect", "non-indexable")]["count"] == 1
+    assert "one-dofollow-inlink" in [f["id"] for f in result["findings"]]
+    assert "no-internal-inlinks" in [f["id"] for f in result["findings"]]
+    assert result["summary"]["internal"]["pages_checked"] == 6
+    assert "internal links only" in finds[("links-to-redirect", "indexable")]["title"]
+    assert finds[("links-to-broken", "non-indexable")]["count"] == 1
+
+
+def test_external_classification(monkeypatch):
+    def probe(url, method, ua, timeout):
+        class Response:
+            def __init__(self, status, headers=None):
+                self.status_code, self.headers = status, headers or {}
+
+            def close(self):
+                pass
+
+        if url.endswith("/timeout"):
+            raise requests.exceptions.Timeout("timeout")
+        if url.endswith("/go"):
+            return Response(301, {"Location": "https://ext.test/final"})
+        if url.endswith("/go-blocked"):
+            return Response(301, {"Location": "https://ext.test/blocked-final"})
+        if url.endswith("/go-404"):
+            return Response(301, {"Location": "https://ext.test/missing-final"})
+        if url.endswith("/blocked-final"):
+            return Response(403)
+        if url.endswith("/missing-final"):
+            return Response(404)
+        return Response({"blocked": 403, "999": 999, "404": 404}.get(url.rsplit("/", 1)[-1], 200))
+
+    monkeypatch.setattr(link_audit, "_probe", probe)
+    result = link_audit.audit(snapshot(), "fixture", timeout=1, per_host_delay=0)
+    by_id = {f["id"]: f for f in result["findings"]}
+    assert by_id["external-blocked"]["count"] == 1
+    assert by_id["external-4xx"]["details"][0]["final_status"] == 404
+    assert "external-timeout" in by_id
+    assert by_id["external-3xx"]["details"][0]["final_status"] == 200
+    assert result["summary"]["external"]["urls_checked"] == 7
+    redirects = {
+        (f["scope"], d["source"]): d
+        for f in result["findings"]
+        if f["id"] == "links-to-redirect"
+        for d in f["details"]
+    }
+    assert redirects[("indexable", "https://example.test/")]["targets"][-1]["kind"] == "external"
+    counts = result["summary"]["internal"]["findings"]
+    assert counts["links_to_redirect_external_pages"]["indexable"] == 1
+    assert counts["links_to_redirect_external_pages"]["non-indexable"] == 1
+    assert counts["links_to_redirect_internal_pages"]["indexable"] == 1
+    assert any(
+        d["final_status"] == 403 and d["class"] == "redirect"
+        for d in by_id["external-3xx"]["details"]
+    )
+    assert any(
+        d["final_status"] == 404 and d["via_redirect"] for d in by_id["external-4xx"]["details"]
+    )
+    assert any(
+        d["linked_from_count"] == 2
+        for f in by_id.values()
+        for d in f["details"]
+        if "linked_from_count" in d
+    )

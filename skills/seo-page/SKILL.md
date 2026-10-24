@@ -18,7 +18,7 @@ metadata:
 
 ### On-Page SEO
 - Title tag: 50-60 characters, includes primary keyword, unique
-- Meta description: 150-160 characters, compelling, includes keyword
+- Meta description: 150-160 characters, compelling, includes keyword. Over 160 characters is truncated: flag it (`crawl_snapshot.py onpage` reports it site-wide)
 - Meta description is not a restatement of the title: run
   `"${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo" run metadata_template.py --title "<title>" --description "<desc>" --json`
   (heuristic, deterministic string comparison). A description that opens by
@@ -26,6 +26,7 @@ metadata:
   "Start free!") is templated metadata, the shape bulk generation jobs produce
   site-wide, and duplicated or templated metadata is a documented
   content-quality problem regardless of how original the body copy is
+- Title vs SERP: with stored SERP data, `crawl_snapshot.py crawl <url> --max-pages 1` then `serp_title_check.py <snapshot> --serp <file>` shows whether Google shows a different title
 - H1: exactly one, matches page intent, includes keyword
 - H2-H6: logical hierarchy (no skipped levels), descriptive
 - URL: short, descriptive, hyphenated, no parameters
@@ -48,7 +49,7 @@ metadata:
 
 ### Schema Markup
 - Detect all types (JSON-LD preferred)
-- Validate required properties
+- Validate required properties: `"${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo" run schema_validate.py <url>` (schema.org vocabulary plus Google required and recommended properties, per node)
 - Identify missing opportunities
 - Never recommend HowTo (deprecated) or FAQ for rich results (retired May 2026); existing FAQPage need not be removed, use QAPage for genuine Q&A
 
