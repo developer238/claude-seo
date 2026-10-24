@@ -149,12 +149,10 @@ def extract_html(html, page_url, site_host, headers=None, html_bytes=None, respo
         if m.get("name", "").lower() in ("robots", "googlebot") and m.get("content"):
             robots.append(m["content"].strip())
     text_soup = BeautifulSoup(str(soup), "html.parser")
-    for node in text_soup.find_all(
-        ["script", "style", "noscript", "nav", "header", "footer", "aside"]
-    ):
+    for node in text_soup.find_all(["script", "style", "noscript"]):
         node.decompose()
-    main = text_soup.find("main") or text_soup.body or text_soup
-    text = " ".join(main.get_text(" ", strip=True).split())
+    body = text_soup.body or text_soup
+    text = " ".join(body.get_text(" ", strip=True).split())
     raw_size = html_bytes if html_bytes is not None else len(html.encode("utf-8"))
     visible_size = len(text.encode("utf-8"))
     heading_texts = [
@@ -666,6 +664,11 @@ def validate_robots(text):
     return issues
 
 
+def is_url_anchor(text):
+    value = (text or "").strip().lower()
+    return value.startswith(("http://", "https://", "www."))
+
+
 def _jsonld_types(blocks):
     """All @type values in JSON-LD blocks, including @graph members."""
     found = set()
@@ -781,6 +784,8 @@ def onpage(path, max_desc, min_text_ratio=0.10):
 
     no_anchor = {}
     no_anchor_total = 0
+    url_anchors = {}
+    url_anchor_total = 0
     nofollow_external = {}
     nofollow_external_pages = {}
     nofollow_total = 0
@@ -798,6 +803,14 @@ def onpage(path, max_desc, min_text_ratio=0.10):
         if p.get("indexable") and empty_links:
             no_anchor[url] = empty_links
             no_anchor_total += len(empty_links)
+        bare_url_links = [
+            {"target": link["target"], "text": link.get("text", "")}
+            for link in links
+            if is_url_anchor(link.get("text"))
+        ]
+        if bare_url_links:
+            url_anchors[url] = bare_url_links
+            url_anchor_total += len(bare_url_links)
         external_nofollow = [
             link for link in links if not link.get("internal") and link.get("nofollow")
         ]
@@ -812,8 +825,7 @@ def onpage(path, max_desc, min_text_ratio=0.10):
         h1s = p.get("h1") or []
         title = " ".join((p.get("title") or "").split()).casefold()
         first_h1 = " ".join(h1s[0].split()).casefold() if h1s else ""
-        stripped_title = re.sub(r"\s+[|\-]\s+[^|\-]+$", "", title).strip()
-        if is_html_page(p) and first_h1 and (title == first_h1 or stripped_title == first_h1):
+        if is_html_page(p) and first_h1 and title == first_h1:
             duplicate_titles.append({"url": url, "title": p.get("title"), "h1": h1s[0]})
         ratio = p.get("text_ratio", 0)
         if ratio < min_text_ratio:
@@ -847,6 +859,7 @@ def onpage(path, max_desc, min_text_ratio=0.10):
     counts.update(
         {
             "links-no-anchor": len(no_anchor),
+            "links-url-as-anchor": len(url_anchors),
             "duplicate-h1-title": len(duplicate_titles),
             "low-text-ratio": len(low_ratio),
             "nofollow-external": len(nofollow_external_pages),
@@ -865,6 +878,16 @@ def onpage(path, max_desc, min_text_ratio=0.10):
                 sorted(no_anchor),
                 count=len(no_anchor),
                 details=[{"url": u, "links": no_anchor[u]} for u in sorted(no_anchor)],
+            )
+        )
+    if url_anchors:
+        fs.append(
+            finding(
+                "links-url-as-anchor",
+                "Low",
+                "Pages use bare URLs as anchor text",
+                sorted(url_anchors),
+                details=[{"url": url, "links": url_anchors[url]} for url in sorted(url_anchors)],
             )
         )
     if duplicate_titles:
@@ -939,6 +962,7 @@ def onpage(path, max_desc, min_text_ratio=0.10):
             "at_155": sum(len(p.get("meta_description") or "") > 155 for p in html.values()),
             "counts": counts,
             "links_no_anchor_total": no_anchor_total,
+            "links_url_as_anchor_total": url_anchor_total,
             "nofollow_external_total": nofollow_total,
             "nofollow_external_hosts": [
                 {"host": host, "links": count}
@@ -1051,6 +1075,8 @@ def themes(snapshot_path, links_path=None, schema_path=None):
             issues.add("one-dofollow-inlink")
         if any(link.get("no_anchor") for link in page.get("links", [])):
             issues.add("links-no-anchor")
+        if any(is_url_anchor(link.get("text")) for link in page.get("links", [])):
+            issues.add("links-url-as-anchor")
         if issues:
             internal_failures.append({"url": url, "issues": sorted(issues)})
 
@@ -1073,10 +1099,8 @@ def themes(snapshot_path, links_path=None, schema_path=None):
         issues = []
         if page.get("response_ms", 0) > 1500:
             issues.append("slow-response")
-        if page.get("html_bytes", 0) > 1024 * 1024:
+        if page.get("html_bytes", 0) > 1.5 * 1024 * 1024:
             issues.append("large-html")
-        if page.get("text_ratio", 0) < 0.10:
-            issues.append("low-text-ratio")
         if issues:
             performance_failures.append({"url": url, "issues": issues})
 

@@ -61,12 +61,15 @@ $CS run crawl_snapshot.py onpage {domain}-audit/snapshots/snapshot-<date>.json -
 $CS run link_audit.py <snapshot> --out {domain}-audit/findings/links.json
 $CS run schema_validate.py <snapshot> --out {domain}-audit/findings/schema.json
 $CS run serp_title_check.py <snapshot> --serp <stored-serp.json> --out {domain}-audit/findings/serp-titles.json
+$CS run crawl_snapshot.py themes <snapshot> --links {domain}-audit/findings/links.json --schema {domain}-audit/findings/schema.json --out {domain}-audit/findings/themes.json
+$CS run js_impact.py <snapshot> --max-pages 15 --out {domain}-audit/findings/js-impact.json
 $CS run crawl_snapshot.py diff --latest {domain}-audit/snapshots/ --out {domain}-audit/findings/changes.json
 $CS run indexnow_submit.py --check <url> --changes {domain}-audit/findings/changes.json --out {domain}-audit/findings/indexnow.json
 ```
 
 - Re-audit: crawl into the same folder, then `diff --latest` (title, meta description, H1, word-count changes, new and lost pages and referring domains). First crawl has no baseline: say so.
 - Report internal-link counts split by indexable vs non-indexable source page; external 403/429/999 are bot-blocks, never "broken".
+- `onpage` also covers robots.txt syntax, anchor problems, duplicate H1/title, text-to-HTML ratio, nofollow external links, blocked pages and AI-search content signals; `themes` gives per-theme % (Crawlability, Markup, Internal linking, HTTPS, Performance): show it above the severity list.
 - SERP titles: use stored SERP data (DataForSEO organic pulls, `seo.pulls`); no new paid calls.
 
 ## Output Files

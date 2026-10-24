@@ -148,6 +148,10 @@ Multi-modal content can support selection in AI answers (third-party claims only
 
 ---
 
+## Site-Wide AI Content Signals
+
+`"${CLAUDE_PLUGIN_ROOT}/scripts/claude-seo" run crawl_snapshot.py onpage <snapshot>` emits `ai-content-signals`: indexable pages failing three or more of thin copy, weak heading structure, no structured data, no question headings or lists, and no byline or date on articles. It is a cheap proxy, not a measure of citations; confirm with the citability checks below.
+
 ## AI Crawler Detection
 
 Check `robots.txt` for these AI crawlers:

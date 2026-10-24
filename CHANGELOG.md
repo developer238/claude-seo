@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     vocabulary and Google's required and recommended properties
     (`data/schemaorg-vocab.json`, `data/google-rich-results.json`).
   - `serp_title_check.py`: page title vs the title in stored SERP data.
+  - `js_impact.py`: raw HTML vs rendered DOM, flags content, links, schema and head tags that only exist after JavaScript.
+  - `crawl_snapshot.py onpage` also validates robots.txt (Content-Signal is valid), finds empty and bare-URL anchors, duplicate H1/title, low text-to-HTML ratio, nofollow external links, blocked pages and AI-search content signals; `themes` reports Crawlability, Markup, Internal linking, HTTPS and Performance percentages.
   - `indexnow_submit.py --check`: key file and endpoint detection, changed
     pages never submitted; submissions are now logged to a local ledger.
 

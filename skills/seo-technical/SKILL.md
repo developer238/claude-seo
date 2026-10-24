@@ -121,9 +121,14 @@ Allow: /
 - URL length: flag >100 characters
 - Trailing slashes: consistent usage
 
+#### Robots.txt, Blocked Pages and JavaScript Impact
+- `crawl_snapshot.py onpage` validates robots.txt syntax (`robots-syntax`; `Content-Signal` is a valid directive) and lists pages blocked by robots.txt or noindex (`pages-blocked`)
+- `js_impact.py <snapshot or url>` compares raw HTML with the rendered DOM and flags content, links, schema or head tags that only exist after JavaScript
+
 #### Link Health
 Run `crawl_snapshot.py crawl <url>` then `link_audit.py <snapshot>` (see `seo-audit/references/crawl-snapshot.md`).
 - Internal links to broken pages (`links-to-broken`) and to redirecting URLs (`links-to-redirect`): count source pages split by indexable vs non-indexable; fix the href to the final URL (a trailing-slash 308 on a nav link affects every page)
+- Links with empty anchors (icon-only, no aria-label) or a bare URL as anchor text: `links-no-anchor`, `links-url-as-anchor`
 - External links by class, reported separately: 4xx, 3xx, 5xx, timeout, connection error. 403, 429 and 999 are bot-blocks (`external-blocked`), not broken links; confirm those in a browser
 
 ### 5. Mobile Optimization & Page Experience

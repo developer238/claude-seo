@@ -116,7 +116,7 @@ def test_onpage_new_findings(tmp_path):
             ],
         ),
         article: dict(
-            page(article, title="Same | Brand", h1=["Same"], words=12),
+            page(article, title="Same", h1=["Same"], words=12),
             h2_count=0,
             jsonld=[],
             question_headings=0,
@@ -164,6 +164,7 @@ def test_onpage_new_findings(tmp_path):
     } <= set(ids)
     assert result["summary"]["counts"]["links-no-anchor"] == 1
     assert result["summary"]["nofollow_external_total"] == 1
+    assert result["summary"]["links_url_as_anchor_total"] == 0
     assert result["summary"]["counts"]["pages-blocked-robots"] == 1
     assert result["summary"]["counts"]["pages-blocked-noindex"] == 1
 
@@ -196,14 +197,21 @@ def test_themes_theme_percentages(tmp_path):
             html_bytes=100,
             text_ratio=0.2,
             response_ms=200,
-            links=[],
+            links=[
+                {
+                    "target": "https://outside.example/",
+                    "internal": False,
+                    "nofollow": False,
+                    "text": "https://outside.example/",
+                }
+            ],
         ),
         orphan: dict(
             page(orphan),
             final_url=orphan,
             redirect_chain=[],
             html_bytes=100,
-            text_ratio=0.2,
+            text_ratio=0.05,
             response_ms=200,
             links=[],
         ),
@@ -226,9 +234,37 @@ def test_themes_theme_percentages(tmp_path):
     assert result["summary"]["themes"]["crawlability"] == 75.0
     assert result["summary"]["themes"]["markup"] == 75.0
     assert result["themes"]["internal_linking"]["percent"] == 0.0
+    child_failure = next(
+        item
+        for item in result["themes"]["internal_linking"]["failing_items"]
+        if item["url"] == child
+    )
+    assert "links-url-as-anchor" in child_failure["issues"]
     assert result["themes"]["https"]["percent"] == 75.0
     assert result["themes"]["performance"]["percent"] == 100.0
     assert result["summary"]["overall"][0]["theme"] == "internal_linking"
+
+
+def test_text_ratio_counts_nav_and_footer_but_omits_scripts():
+    html = "<html><body><nav>Nav</nav><main>Body</main><footer>Foot</footer><script>Hidden</script></body></html>"
+    result = cs.extract_html(html, "https://example.com/", "example.com")
+    assert result["text_ratio"] == round(len("Nav Body Foot") / len(html.encode()), 3)
+
+
+def test_duplicate_h1_title_requires_exact_match(tmp_path):
+    exact = "https://example.com/exact"
+    branded = "https://example.com/branded"
+    pages = {
+        exact: dict(page(exact, title="Same", h1=[" same  "]), html_bytes=100, text_ratio=0.2),
+        branded: dict(
+            page(branded, title="Same | Brand", h1=["Same"]), html_bytes=100, text_ratio=0.2
+        ),
+    }
+    path = tmp_path / "duplicates.json"
+    cs.save_snapshot(snapshot(pages), path)
+    result = cs.onpage(str(path), 160)
+    finding = next(item for item in result["findings"] if item["id"] == "duplicate-h1-title")
+    assert finding["pages"] == [exact]
 
 
 def test_onpage_findings(tmp_path):
